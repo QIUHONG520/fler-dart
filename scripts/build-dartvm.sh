@@ -152,7 +152,8 @@ DART_BUILD_DIR="out/ReleaseAndroidARM64"
 
 if [ ! -f "$DART_BUILD_DIR/build.ninja" ]; then
     echo "Generating GN build files..."
-    python3 tools/gn.py -m release -a arm64 --os android --no-git-version --no-verify-sdk-hash
+    python3 tools/gn.py -m release -a arm64 --os android --no-git-version --no-verify-sdk-hash \
+        --gn-args="android_ndk_root=\"$NDK_PATH\""
 fi
 
 echo "Building libdart (finding correct target)..."
