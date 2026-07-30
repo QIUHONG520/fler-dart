@@ -167,11 +167,11 @@ echo "Building libdart (finding correct target)..."
 NINJA_TARGETS=$(ninja -C "$DART_BUILD_DIR" -j "$JOBS" -t targets all 2>/dev/null)
 
 # Find the main static lib target (not the shared lib which has macOS -install_name)
-DART_TARGET=$(echo "$NINJA_TARGETS" | grep -E "obj/runtime/libdart\.a:" | head -1 | cut -d: -f1)
+DART_TARGET=$(echo "$NINJA_TARGETS" | grep -E "obj/runtime/libdart\.a:" | head -1 | cut -d: -f1 || true)
 
 if [ -z "$DART_TARGET" ]; then
     # Try to find any static libdart target
-    DART_TARGET=$(echo "$NINJA_TARGETS" | grep -E "runtime.*libdart.*\.a:" | grep -v "dart_jit\|dart_precompiled" | head -1 | cut -d: -f1)
+    DART_TARGET=$(echo "$NINJA_TARGETS" | grep -E "runtime.*libdart.*\.a:" | grep -v "dart_jit\|dart_precompiled" | head -1 | cut -d: -f1 || true)
 fi
 
 if [ -z "$DART_TARGET" ]; then
@@ -188,9 +188,9 @@ else
 fi
 
 # Find the static library (may be in obj/ subdirs)
-DARTVM_LIB=$(find "$DART_BUILD_DIR" -name "libdart_vm*.a" -o -name "libdart.a" 2>/dev/null | head -1)
+DARTVM_LIB=$(find "$DART_BUILD_DIR" -name "libdart_vm*.a" -o -name "libdart.a" 2>/dev/null | head -1 || true)
 if [ -z "$DARTVM_LIB" ]; then
-    DARTVM_LIB=$(find "$DART_BUILD_DIR/obj" -name "libdart*.a" 2>/dev/null | head -1)
+    DARTVM_LIB=$(find "$DART_BUILD_DIR/obj" -name "libdart*.a" 2>/dev/null | head -1 || true)
 fi
 if [ -z "$DARTVM_LIB" ]; then
     echo "ERROR: Cannot find libdart*.a in $DART_BUILD_DIR"
