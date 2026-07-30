@@ -18,6 +18,12 @@
 
 set -euo pipefail
 
+cleanup() {
+    local ec=$?
+    echo "─── build-dartvm.sh exit code: $ec ───" >&2
+}
+trap cleanup EXIT
+
 # ═══════════════════════════════════════════════
 # Configuration & args
 # ═══════════════════════════════════════════════
