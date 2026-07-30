@@ -159,7 +159,7 @@ PYEOF
 fi
 
 # 2. Patch CMake template: make ICU optional + Android link flags + atomic_ref
-if ! grep -q "fler-dart: ICU optional" "$BLUTTER_TEMPLATE" 2>/dev/null; then
+if ! grep -q "fler-dart-patched-v2" "$BLUTTER_TEMPLATE" 2>/dev/null; then
     echo "Patching CMake template..."
     python3 - "$BLUTTER_TEMPLATE" "$BLUTTER_DIR" << 'PYEOF'
 import sys
@@ -170,7 +170,7 @@ with open(tmpl, 'r') as f:
 
 c = c.replace(
     "find_package(ICU REQUIRED uc)",
-    "# fler-dart: ICU optional\nif(ANDROID)\n    find_package(ICU QUIET)\n    set(ICU_LIBRARIES \"\")\nelse()\n    find_package(ICU REQUIRED uc)\nendif()"
+    "# fler-dart-patched-v2\n# fler-dart: ICU optional\nif(ANDROID)\n    find_package(ICU QUIET)\n    set(ICU_LIBRARIES \"\")\nelse()\n    find_package(ICU REQUIRED uc)\nendif()"
 )
 
 c = c.replace(
