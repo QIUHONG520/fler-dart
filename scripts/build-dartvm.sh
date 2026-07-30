@@ -169,7 +169,7 @@ with open(tmpl, 'r') as f:
 
 c = c.replace(
     "find_package(ICU REQUIRED uc)",
-    "# fler-dart: ICU optional\nif(ANDROID)\n    find_package(ICU QUIET uc)\n    if(NOT ICU_FOUND)\n        set(ICU_LIBRARIES \"\")\n        set(ICU_INCLUDE_DIRS \"\")\n    endif()\nelse()\n    find_package(ICU REQUIRED uc)\nendif()"
+    "# fler-dart: ICU optional\nif(ANDROID)\n    find_package(ICU QUIET)\n    set(ICU_LIBRARIES \"\")\nelse()\n    find_package(ICU REQUIRED uc)\nendif()"
 )
 
 c = c.replace(
