@@ -13,6 +13,11 @@ template <typename T>
 class atomic_ref {
     T* ptr_;
 
+    static constexpr memory_order __cmpexch_failure_order(memory_order o) noexcept {
+        return o == memory_order_release ? memory_order_relaxed :
+               o == memory_order_acq_rel ? memory_order_acquire : o;
+    }
+
     // Load helper: read into aligned raw storage to avoid requiring
     // default constructor (e.g. dart::CompressedTypePtr is not default-
     // constructible but IS trivially copyable).
@@ -56,10 +61,22 @@ public:
     }
 
     bool compare_exchange_weak(T& expected, T desired,
+                               memory_order order) noexcept {
+        return compare_exchange_weak(expected, desired, order,
+                                     __cmpexch_failure_order(order));
+    }
+
+    bool compare_exchange_weak(T& expected, T desired,
                                memory_order success,
                                memory_order failure) noexcept {
         return __atomic_compare_exchange(ptr_, &expected, &desired,
                                          true, int(success), int(failure));
+    }
+
+    bool compare_exchange_strong(T& expected, T desired,
+                                 memory_order order) noexcept {
+        return compare_exchange_strong(expected, desired, order,
+                                       __cmpexch_failure_order(order));
     }
 
     bool compare_exchange_strong(T& expected, T desired,
