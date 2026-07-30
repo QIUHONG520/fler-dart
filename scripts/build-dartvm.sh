@@ -175,7 +175,7 @@ c = c.replace(
 
 c = c.replace(
     "target_compile_options(${LIBNAME} PRIVATE ${cc_opts})",
-    "target_compile_options(${LIBNAME} PRIVATE ${cc_opts})\nif(ANDROID)\n    target_compile_options(${LIBNAME} PRIVATE -include \"" + blutter_dir + "/atomic_ref_compat.h\")\n    target_compile_definitions(${LIBNAME} PRIVATE __ANDROID_API__=31)\nendif()"
+    "target_compile_options(${LIBNAME} PRIVATE ${cc_opts})\nif(ANDROID)\n    target_compile_options(${LIBNAME} PRIVATE -include \"" + blutter_dir + "/atomic_ref_compat.h\" \"-D__INTRODUCED_IN(x)=\")\nendif()"
 )
 
 c = c.replace(
