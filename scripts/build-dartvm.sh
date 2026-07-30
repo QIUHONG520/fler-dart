@@ -195,32 +195,56 @@ fi
 # Step 4: Build Capstone static lib
 # ═══════════════════════════════════════════════
 echo ""
-echo "─── [4/5] Building Capstone static lib ───"
-mkdir -p "$CAPSTONE_BUILD_DIR"
-cd "$CAPSTONE_BUILD_DIR"
+echo "─── [4/5] Finding Capstone ───"
 
-CAPSTONE_CMAKE_ARGS=(
-    -G Ninja
-    -DCMAKE_BUILD_TYPE=Release
-    -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR"
-    -DCAPSTONE_BUILD_SHARED=OFF
-    -DCAPSTONE_BUILD_STATIC=ON
-    -DCAPSTONE_ARCHITECTURES="aarch64"
-)
+# Capstone is a system dependency on Linux (libcapstone-dev).
+# For NDK cross-compile, we download and build from source.
 if [ "$USE_NDK" = true ]; then
-    CAPSTONE_CMAKE_ARGS+=(
-        -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE"
-        -DANDROID_ABI=arm64-v8a
-        -DANDROID_PLATFORM=android-24
-        -DANDROID_STL=c++_static
-    )
+    echo "Downloading capstone source for NDK cross-compile..."
+    CAPSTONE_SRC="$BUILD_ROOT/capstone-src"
+    if [ ! -d "$CAPSTONE_SRC" ]; then
+        mkdir -p "$CAPSTONE_SRC"
+        curl -sL "https://github.com/capstone-engine/capstone/archive/refs/tags/4.0.2.tar.gz" \
+            -o "$BUILD_ROOT/capstone.tar.gz"
+        tar xzf "$BUILD_ROOT/capstone.tar.gz" -C "$CAPSTONE_SRC" --strip-components=1
+    fi
+    mkdir -p "$CAPSTONE_BUILD_DIR"
+    cd "$CAPSTONE_BUILD_DIR"
+    cmake -G Ninja \
+        -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DANDROID_ABI=arm64-v8a \
+        -DANDROID_PLATFORM=android-24 \
+        -DANDROID_STL=c++_static \
+        -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR" \
+        -DCAPSTONE_BUILD_SHARED=OFF \
+        -DCAPSTONE_BUILD_STATIC=ON \
+        -DCAPSTONE_ARCHITECTURES="aarch64" \
+        "$CAPSTONE_SRC"
+    cmake --build . -j "$JOBS"
+    CAPSTONE_LIB=$(find "$CAPSTONE_BUILD_DIR" -name "libcapstone.a" 2>/dev/null | head -1)
+    CAPSTONE_INCLUDE_DIR="$CAPSTONE_SRC/include"
+else
+    echo "Using system capstone..."
+    # Find capstone .a from system
+    CAPSTONE_LIB=$(pkg-config --variable=libdir capstone 2>/dev/null)
+    if [ -n "$CAPSTONE_LIB" ]; then
+        CAPSTONE_LIB="$CAPSTONE_LIB/libcapstone.a"
+        [ ! -f "$CAPSTONE_LIB" ] && CAPSTONE_LIB=$(pkg-config --libs capstone 2>/dev/null)
+    fi
+    if [ -z "$CAPSTONE_LIB" ] || [ ! -f "$CAPSTONE_LIB" ]; then
+        CAPSTONE_LIB=$(find /usr/lib -name "libcapstone.a" 2>/dev/null | head -1)
+    fi
+    if [ -z "$CAPSTONE_LIB" ]; then
+        # Last resort: linker flag
+        CAPSTONE_LIB="-lcapstone"
+    fi
+    CAPSTONE_INCLUDE_DIR="/usr/include"
+    echo "Capstone (system): lib=$CAPSTONE_LIB include=$CAPSTONE_INCLUDE_DIR"
 fi
 
-cmake "${CAPSTONE_CMAKE_ARGS[@]}" "$BLUTTER_DIR/third_party/capstone"
-cmake --build . -j "$JOBS"
-CAPSTONE_LIB=$(find "$CAPSTONE_BUILD_DIR" -name "libcapstone.a" 2>/dev/null | head -1)
 if [ -z "$CAPSTONE_LIB" ]; then
-    echo "ERROR: Capstone build failed"
+    echo "ERROR: Capstone not found"
     exit 1
 fi
 echo "Capstone: $CAPSTONE_LIB"
@@ -238,9 +262,15 @@ if [ ! -d "$DARTVM_INCLUDE_DIR" ]; then
     DARTVM_INCLUDE_DIR=$(find "$PACKAGES_DIR/include" -maxdepth 1 -type d -name "dartvm*" 2>/dev/null | head -1)
 fi
 
-CAPSTONE_INCLUDE_DIR="$BLUTTER_DIR/third_party/capstone/include"
-if [ ! -d "$CAPSTONE_INCLUDE_DIR" ]; then
+if [ ! -d "${CAPSTONE_INCLUDE_DIR:-}" ]; then
+    CAPSTONE_INCLUDE_DIR="$BLUTTER_DIR/third_party/capstone/include"
+fi
+if [ ! -d "${CAPSTONE_INCLUDE_DIR:-}" ]; then
     CAPSTONE_INCLUDE_DIR=$(find "$CAPSTONE_BUILD_DIR" -name "capstone.h" -exec dirname {} \; 2>/dev/null | head -1)
+fi
+if [ ! -d "${CAPSTONE_INCLUDE_DIR:-}" ]; then
+    # System capstone
+    CAPSTONE_INCLUDE_DIR="/usr/include"
 fi
 
 DARTVM_SO_CMAKE_ARGS=(

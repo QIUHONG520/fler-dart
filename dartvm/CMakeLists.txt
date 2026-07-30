@@ -104,8 +104,13 @@ target_include_directories(dartvm PRIVATE
 target_link_libraries(dartvm PRIVATE
     ${DARTVM_LIB_NAME}
     ${CAPSTONE_STATIC_LIB}
-    atomic log z dl pthread
 )
+
+if(ANDROID)
+    target_link_libraries(dartvm PRIVATE atomic log z dl pthread)
+else()
+    target_link_libraries(dartvm PRIVATE z dl pthread)
+endif()
 
 # ─── Compile definitions ───
 target_compile_definitions(dartvm PRIVATE
