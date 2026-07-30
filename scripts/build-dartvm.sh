@@ -185,7 +185,7 @@ c = c.replace(
 # 3. Exclude regexp/ dir (missing ICU headers on NDK; not needed for DART_PRECOMPILED_RUNTIME)
 c = c.replace(
     "include(sourcelist.cmake)\nadd_library",
-    "include(sourcelist.cmake)\nif(ANDROID)\n    list(FILTER SRCS EXCLUDE REGEX "regexp")\nendif()\nadd_library"
+    "include(sourcelist.cmake)\nif(ANDROID)\n    list(FILTER SRCS EXCLUDE REGEX \"regexp\")\nendif()\nadd_library"
 )
 
 print("  CMake template: patched OK")
