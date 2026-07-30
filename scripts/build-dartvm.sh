@@ -103,6 +103,7 @@ if [ "$BUILD_SHARED_LIBS_ONLY" = "1" ]; then
     echo "─── [2/3] Building Capstone shared lib (ARM64) ───"
     CAPSTONE_SRC="$BUILD_ROOT/capstone-src"
     if [ ! -d "$CAPSTONE_SRC" ]; then
+        mkdir -p "$CAPSTONE_SRC"
         curl -sL "https://github.com/capstone-engine/capstone/archive/refs/tags/4.0.2.tar.gz" \
             -o "$BUILD_ROOT/capstone.tar.gz"
         tar xzf "$BUILD_ROOT/capstone.tar.gz" -C "$CAPSTONE_SRC" --strip-components=1
