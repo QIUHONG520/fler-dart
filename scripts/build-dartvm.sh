@@ -91,16 +91,9 @@ if [ "$BUILD_SHARED_LIBS_ONLY" = "1" ]; then
     echo " Output:     $SHARED_LIBS_OUT"
     echo "════════════════════════════════════════════"
 
-    # 1. Clone Blutter (for ICU prebuilt)
+    # 1. Build Capstone shared lib
     echo ""
-    echo "─── [1/3] Cloning Blutter (for ICU) ───"
-    if [ ! -d "$BLUTTER_DIR" ]; then
-        git clone --depth 1 "$BLUTTER_REPO" "$BLUTTER_DIR"
-    fi
-
-    # 2. Build Capstone shared lib
-    echo ""
-    echo "─── [2/3] Building Capstone shared lib (ARM64) ───"
+    echo "─── [1/4] Building Capstone shared lib (ARM64) ───"
     CAPSTONE_SRC="$BUILD_ROOT/capstone-src"
     if [ ! -d "$CAPSTONE_SRC" ]; then
         mkdir -p "$CAPSTONE_SRC"
@@ -123,27 +116,93 @@ if [ "$BUILD_SHARED_LIBS_ONLY" = "1" ]; then
     cmake --build . -j "$JOBS"
     cp "$CAPSTONE_BUILD_DIR/libcapstone.so" "$SHARED_LIBS_OUT/"
 
-    # 3. Copy NDK shared libs
+    # 2. Copy NDK shared libs
     echo ""
-    echo "─── [3/3] Copying NDK shared libs ───"
+    echo "─── [2/4] Copying NDK shared libs ───"
     CPP_SHARED="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
     if [ -f "$CPP_SHARED" ]; then
         cp "$CPP_SHARED" "$SHARED_LIBS_OUT/"
         echo "  → libc++_shared.so"
     fi
 
-    # Copy ICU from blutter's prebuilt
-    ICU_SRC_DIR="$BLUTTER_DIR/icu"
-    if [ -d "$ICU_SRC_DIR" ]; then
-        if [ -f "$ICU_SRC_DIR/lib/libicuuc.so" ]; then
-            cp "$ICU_SRC_DIR/lib/libicuuc.so" "$SHARED_LIBS_OUT/"
-            echo "  → libicuuc.so"
-        fi
-        if [ -f "$ICU_SRC_DIR/lib/libicudata.so" ]; then
-            cp "$ICU_SRC_DIR/lib/libicudata.so" "$SHARED_LIBS_OUT/"
-            echo "  → libicudata.so"
-        fi
+    # 3. Cross-compile ICU shared libs for ARM64 Android
+    #    ICU requires a host build first (for --with-cross-build), then cross-compile.
+    #    Android doesn't support .so version suffixes, so patchelf fixes sonames.
+    echo ""
+    echo "─── [3/4] Building ICU shared libs (ARM64 Android) ───"
+    ICU_SRC="$BUILD_ROOT/icu-src"
+    ICU_HOST_BUILD="$BUILD_ROOT/icu-host-build"
+    ICU_CROSS_BUILD="$BUILD_ROOT/icu-cross-build"
+
+    if [ ! -d "$ICU_SRC" ]; then
+        echo "  Downloading ICU 73.2 source..."
+        curl -sL "https://github.com/unicode-org/icu/releases/download/icu4c-73_2-src.tgz" \
+            -o "$BUILD_ROOT/icu-src.tgz"
+        mkdir -p "$ICU_SRC"
+        tar xzf "$BUILD_ROOT/icu-src.tgz" -C "$ICU_SRC" --strip-components=1
+        rm -f "$BUILD_ROOT/icu-src.tgz"
     fi
+
+    # Host build (required by ICU cross-compile for config tools)
+    if [ ! -f "$ICU_HOST_BUILD/config.status" ]; then
+        echo "  Building ICU host configuration..."
+        mkdir -p "$ICU_HOST_BUILD"
+        cd "$ICU_HOST_BUILD"
+        CFLAGS="-O2" CXXFLAGS="-O2" "$ICU_SRC/source/configure" \
+            --disable-shared --enable-static \
+            --disable-tests --disable-samples \
+            --disable-extras --disable-icuio \
+            > /dev/null 2>&1
+        make -j"$JOBS" > /dev/null 2>&1
+    fi
+
+    # Cross-compile for ARM64 Android
+    echo "  Cross-compiling ICU for ARM64 Android..."
+    NDK_TOOLCHAIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin"
+    SYSROOT="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+    mkdir -p "$ICU_CROSS_BUILD"
+    cd "$ICU_CROSS_BUILD"
+
+    # Clean previous attempt if config failed
+    if [ ! -f config.status ]; then
+        CFLAGS="-O2 -fPIC" CXXFLAGS="-O2 -fPIC" \
+        "$ICU_SRC/source/configure" \
+            --host=aarch64-linux-android \
+            --with-cross-build="$ICU_HOST_BUILD" \
+            --with-sysroot="$SYSROOT" \
+            --enable-shared --disable-static \
+            --disable-tests --disable-samples \
+            --disable-extras --disable-icuio \
+            --with-data-packaging=library \
+            CC="$NDK_TOOLCHAIN/aarch64-linux-android24-clang" \
+            CXX="$NDK_TOOLCHAIN/aarch64-linux-android24-clang++" \
+            AR="$NDK_TOOLCHAIN/llvm-ar" \
+            RANLIB="$NDK_TOOLCHAIN/llvm-ranlib" \
+            STRIP="$NDK_TOOLCHAIN/llvm-strip"
+    fi
+    make -j"$JOBS"
+
+    # Copy ICU shared libs and fix sonames (Android doesn't support version suffixes)
+    for lib in libicuuc libicudata; do
+        src=$(ls "$ICU_CROSS_BUILD/lib/${lib}.so."* 2>/dev/null | head -1)
+        if [ -n "$src" ]; then
+            cp "$src" "$SHARED_LIBS_OUT/${lib}.so"
+            patchelf --set-soname "${lib}.so" "$SHARED_LIBS_OUT/${lib}.so" 2>/dev/null || \
+                echo "  WARNING: patchelf not available, soname may be incorrect"
+            echo "  → ${lib}.so"
+        else
+            echo "  WARNING: ${lib}.so not found in ICU build output"
+        fi
+    done
+
+    # 4. Verify all shared libs
+    echo ""
+    echo "─── [4/4] Verifying shared libs ───"
+    for f in "$SHARED_LIBS_OUT"/lib*.so; do
+        if [ -f "$f" ]; then
+            echo "  $(basename "$f")  ($(ls -lh "$f" | awk '{print $5}'))  $(file "$f" | grep -o 'ELF.*ARM')"
+        fi
+    done
 
     echo ""
     echo "════════════════════════════════════════════"
