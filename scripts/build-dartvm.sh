@@ -103,13 +103,21 @@ fi
 
 BLUTTER_DARTDUMPER="$BLUTTER_DIR/blutter/src/DartDumper.cpp"
 if grep -q "closure\.entry_point()" "$BLUTTER_DARTDUMPER" 2>/dev/null; then
-    echo "Patching DartDumper.cpp: closure.entry_point() → closure.function()->entry_point()"
+    echo "Patching DartDumper.cpp: closure.entry_point() → Function::Handle entry_point()"
     python3 -c "
 with open('$BLUTTER_DARTDUMPER', 'r') as f:
     c = f.read()
-c = c.replace('closure.entry_point()', 'closure.function()->entry_point()')
-n = c.count('closure.function()->entry_point()')
-print(f'  DartDumper.cpp: {n} occurrences')
+# closure.function() returns CompressedObjectPtr, not FunctionPtr handle.
+# Need Function::Handle to access entry_point().
+c = c.replace(
+    'closure.entry_point() - app.base()',
+    'dart::Function::Handle(closure.function()).entry_point() - app.base()'
+)
+c = c.replace(
+    'closure.entry_point()',
+    'dart::Function::Handle(closure.function()).entry_point()'
+)
+print(f'  DartDumper.cpp patched')
 with open('$BLUTTER_DARTDUMPER', 'w') as f:
     f.write(c)
 "
