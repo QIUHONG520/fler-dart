@@ -46,6 +46,18 @@ jobs:
         with:
           ndk-version: ${{ env.NDK_VERSION }}
 
+      - name: Cache shared libs build (Capstone + ICU sources and builds)
+        id: cache-shared-libs-build
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/fler-dart-cache/shared_libs/capstone-src
+            /tmp/fler-dart-cache/shared_libs/capstone_build
+            /tmp/fler-dart-cache/shared_libs/icu-src
+            /tmp/fler-dart-cache/shared_libs/icu-host-build
+            /tmp/fler-dart-cache/shared_libs/icu-cross-build
+          key: shared-libs-${{ env.NDK_VERSION }}-icu73-2-capstone4-0-2-v1
+
       - name: Build shared libraries
         run: |
           bash fler-dart/scripts/build-dartvm.sh \
@@ -124,7 +136,9 @@ jobs:
           path: |
             /tmp/fler-dart-cache/dartvm_${{ matrix.dart-version }}/blutter
             /tmp/fler-dart-cache/dartvm_${{ matrix.dart-version }}/blutter/packages
-          key: dartvm-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v11
+          key: dartvm-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v12-dynamic
+          restore-keys: |
+            dartvm-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v11
 
       - name: Build dartvm.so (dynamic linking)
         run: |
