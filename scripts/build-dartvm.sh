@@ -55,7 +55,7 @@ DARTVM_SO_BUILD_DIR="$BUILD_ROOT/dartvm_so_build"
 SQLITE_DIR="$BUILD_ROOT/sqlite"
 ARCH_TAG="android_arm64"
 
-cleanup() { [ "${CLEANUP:-0}" = "1" ] && rm -rf "$BUILD_ROOT"; }
+cleanup() { [ "${CLEANUP:-0}" = "1" ] && rm -rf "$BUILD_ROOT" || true; }
 trap cleanup EXIT
 
 echo "════════════════════════════════════════════"
