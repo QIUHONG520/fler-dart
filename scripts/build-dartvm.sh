@@ -101,10 +101,13 @@ target_os = ["android"]
 EOF
 
     echo "Running gclient sync (this may take a while on first run)..."
-    gclient sync --revision "tags/$DART_VERSION" --no-history -j "$JOBS"
+    gclient sync --no-history -j "$JOBS"
 
     cd sdk
+    git fetch --tags
     git checkout "tags/$DART_VERSION"
+    cd "$DART_SDK_ROOT"
+    gclient sync -D --no-history -j "$JOBS"
 else
     echo "Dart SDK already present at $DART_SDK_DIR"
 fi
