@@ -86,7 +86,16 @@ endif()
 # ─── Our wrapper ───
 set(DARTVM_SO_SRCS
     ${CMAKE_CURRENT_SOURCE_DIR}/src/blutter_entry.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/regexp_stubs.cpp
     ${SQLITE_SRC}
+)
+
+# PCH must be disabled for regexp_stubs.cpp: the stubs forward-declare
+# `namespace dart::BootstrapNatives`, which would ODR-conflict with the
+# Dart SDK's `class dart::BootstrapNatives` if pulled in via pch.h.
+set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/regexp_stubs.cpp
+    PROPERTIES SKIP_PRECOMPILE_HEADERS ON
 )
 
 # ─── Shared library ───
