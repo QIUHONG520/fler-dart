@@ -150,19 +150,16 @@ export ANDROID_NDK_ROOT="$NDK_PATH"
 # Generate GN build files for Android ARM64
 DART_BUILD_DIR="out/ReleaseAndroidARM64"
 
-# Remove stale build if NDK path changed
-if [ -f "$DART_BUILD_DIR/build.ninja" ]; then
-    CURRENT_NDK=$(grep -oP 'android_ndk_root\s*=\s*"\K[^"]*' "$DART_BUILD_DIR/args.gn" 2>/dev/null || true)
-    if [ -n "$CURRENT_NDK" ] && [ "$CURRENT_NDK" != "$NDK_PATH" ]; then
-        echo "NDK path changed ($CURRENT_NDK → $NDK_PATH), cleaning build dir..."
-        rm -rf "$DART_BUILD_DIR"
-    fi
+# Dart SDK's GN expects NDK at third_party/android_tools/ndk.
+# Create symlink to the system NDK instead of using GN args.
+mkdir -p third_party/android_tools
+if [ ! -L third_party/android_tools/ndk ]; then
+    ln -s "$NDK_PATH" third_party/android_tools/ndk
 fi
 
 if [ ! -f "$DART_BUILD_DIR/build.ninja" ]; then
     echo "Generating GN build files..."
-    python3 tools/gn.py -m release -a arm64 --os android --no-git-version --no-verify-sdk-hash \
-        --gn-args="android_ndk_root=\"$NDK_PATH\""
+    python3 tools/gn.py -m release -a arm64 --os android --no-git-version --no-verify-sdk-hash
 fi
 
 echo "Building libdart (finding correct target)..."
