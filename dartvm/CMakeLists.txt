@@ -12,7 +12,7 @@ project(dartvm C CXX)
 #
 # Version-specific defines (from Blutter's pch.h):
 # OLD_MAP_SET_NAME, NO_LAST_INTERNAL_ONLY_CID, HAS_SHARED_CLASS_TABLE,
-# HAS_TYPE_REF, HAS_RECORD_TYPE, NO_INIT_LATE_STATIC_FIELD,
+# HAS_RECORD_TYPE, NO_INIT_LATE_STATIC_FIELD,
 # NO_METHOD_EXTRACTOR_STUB, UNIFORM_INTEGER_ACCESS, NO_CODE_ANALYSIS
 
 set(CMAKE_CXX_STANDARD 20)
@@ -133,9 +133,6 @@ if(NO_LAST_INTERNAL_ONLY_CID)
 endif()
 if(HAS_SHARED_CLASS_TABLE)
     target_compile_definitions(dartvm PRIVATE HAS_SHARED_CLASS_TABLE)
-endif()
-if(HAS_TYPE_REF)
-    target_compile_definitions(dartvm PRIVATE HAS_TYPE_REF)
 endif()
 if(HAS_RECORD_TYPE)
     target_compile_definitions(dartvm PRIVATE HAS_RECORD_TYPE)
