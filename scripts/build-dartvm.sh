@@ -224,6 +224,34 @@ if [ ! -d "$BLUTTER_DIR" ]; then
 fi
 echo "Blutter: $BLUTTER_DIR"
 
+# Patch Blutter for Dart SDK API compat
+# Dart SDK's Closure class lacks entry_point(); use Function::entry_point() instead.
+BLUTTER_DARTAPP="$BLUTTER_DIR/blutter/src/DartApp.cpp"
+if grep -q "closure\.entry_point()" "$BLUTTER_DARTAPP" 2>/dev/null; then
+    echo "Patching Blutter: closure.entry_point() → func.entry_point()"
+    python3 -c "
+import re
+with open('$BLUTTER_DARTAPP', 'r') as f:
+    c = f.read()
+# Replace: closure.entry_point() lines → func.entry_point() after Handle
+c, n = re.subn(
+    r'(const auto ep_addr = )closure\.entry_point\(\)( - base\(\);)\s+(const auto& func = dart::Function::Handle\(closure\.function\(\)\);)',
+    r'\3\n\t\tconst auto ep_addr = func.entry_point()\2',
+    c
+)
+if n == 0:
+    # Try alternate indentation
+    c, n = re.subn(
+        r'(const auto ep_addr = )closure\.entry_point\(\)( - base\(\);)\s+(const auto& func = dart::Function::Handle\(closure\.function\(\)\);)',
+        r'\3\n            const auto ep_addr = func.entry_point()\2',
+        c
+    )
+print(f'Patched {n} occurrence(s)')
+with open('$BLUTTER_DARTAPP', 'w') as f:
+    f.write(c)
+"
+fi
+
 # ═══════════════════════════════════════════════
 # Step 3: Build Capstone static lib for ARM64
 # ═══════════════════════════════════════════════
