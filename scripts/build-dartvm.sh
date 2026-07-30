@@ -223,23 +223,31 @@ if [ "$USE_NDK" = true ]; then
         "$CAPSTONE_SRC"
     cmake --build . -j "$JOBS"
     CAPSTONE_LIB=$(find "$CAPSTONE_BUILD_DIR" -name "libcapstone.a" 2>/dev/null | head -1)
-    CAPSTONE_INCLUDE_DIR="$CAPSTONE_SRC/include"
+    # Source tree: include/capstone/capstone.h → -I<root>/include/capstone
+    CAPSTONE_INCLUDE_DIR="$CAPSTONE_SRC/include/capstone"
 else
     echo "Using system capstone..."
-    # Find capstone .a from system
     CAPSTONE_LIB=$(pkg-config --variable=libdir capstone 2>/dev/null)
     if [ -n "$CAPSTONE_LIB" ]; then
         CAPSTONE_LIB="$CAPSTONE_LIB/libcapstone.a"
         [ ! -f "$CAPSTONE_LIB" ] && CAPSTONE_LIB=$(pkg-config --libs capstone 2>/dev/null)
     fi
     if [ -z "$CAPSTONE_LIB" ] || [ ! -f "$CAPSTONE_LIB" ]; then
-        CAPSTONE_LIB=$(find /usr/lib -name "libcapstone.a" 2>/dev/null | head -1)
+        CAPSTONE_LIB=$(find /usr/lib /usr/local/lib -name "libcapstone.a" 2>/dev/null | head -1)
     fi
     if [ -z "$CAPSTONE_LIB" ]; then
-        # Last resort: linker flag
         CAPSTONE_LIB="-lcapstone"
     fi
-    CAPSTONE_INCLUDE_DIR="/usr/include"
+    # System capstone.h lives in /usr/include/capstone/ or /usr/local/include/capstone/
+    CAPSTONE_INCLUDE_DIR=$(pkg-config --cflags-only-I capstone 2>/dev/null | sed 's/-I//')
+    if [ -z "$CAPSTONE_INCLUDE_DIR" ] || [ ! -f "$CAPSTONE_INCLUDE_DIR/capstone.h" ]; then
+        for dir in /usr/include/capstone /usr/local/include/capstone; do
+            if [ -f "$dir/capstone.h" ]; then
+                CAPSTONE_INCLUDE_DIR="$dir"
+                break
+            fi
+        done
+    fi
     echo "Capstone (system): lib=$CAPSTONE_LIB include=$CAPSTONE_INCLUDE_DIR"
 fi
 
@@ -269,8 +277,12 @@ if [ ! -d "${CAPSTONE_INCLUDE_DIR:-}" ]; then
     CAPSTONE_INCLUDE_DIR=$(find "$CAPSTONE_BUILD_DIR" -name "capstone.h" -exec dirname {} \; 2>/dev/null | head -1)
 fi
 if [ ! -d "${CAPSTONE_INCLUDE_DIR:-}" ]; then
-    # System capstone
-    CAPSTONE_INCLUDE_DIR="/usr/include"
+    for dir in /usr/include/capstone /usr/local/include/capstone; do
+        if [ -f "$dir/capstone.h" ]; then
+            CAPSTONE_INCLUDE_DIR="$dir"
+            break
+        fi
+    done
 fi
 
 DARTVM_SO_CMAKE_ARGS=(
