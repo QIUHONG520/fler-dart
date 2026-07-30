@@ -14,7 +14,7 @@ on:
       ndk-version:
         description: 'Android NDK version'
         required: false
-        default: 'r28'
+        default: 'r27'
         type: string
 
 env:
