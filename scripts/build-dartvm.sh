@@ -182,10 +182,10 @@ c = c.replace(
     "if(ANDROID)\n\ttarget_link_libraries(${LIBNAME} PUBLIC atomic log ${ICU_LIBRARIES})\nelseif(MSVC)\n\ttarget_link_libraries(${LIBNAME} PUBLIC ${ICU_LIBRARIES})\nelse()\n\ttarget_link_libraries(${LIBNAME} PUBLIC dl pthread ${ICU_LIBRARIES})\nendif()"
 )
 
-# 3. Exclude char-predicates.cc (ICU regex) for Android
+# 3. Suppress ICU availability errors (char-predicates.cc uses functions introduced in API 31)
 c = c.replace(
-    "include(sourcelist.cmake)",
-    "include(sourcelist.cmake)\nif(ANDROID)\n    list(REMOVE_ITEM SRCS \"${SRCDIR}/vm/regexp/char-predicates.cc\")\nendif()"
+    "set(cc_opts",
+    "set(cc_opts\n\t\t-Wno-unguarded-availability"
 )
 
 print("  CMake template: patched OK")
