@@ -155,8 +155,18 @@ if [ ! -f "$DART_BUILD_DIR/build.ninja" ]; then
     python3 tools/gn.py -m release -a arm64 --os android --no-git-version --no-verify-sdk-hash
 fi
 
-echo "Building libdart..."
-ninja -C "$DART_BUILD_DIR" -j "$JOBS" libdart
+echo "Building libdart (finding correct target)..."
+# Try known target names; GN outputs vary by configuration
+ninja -C "$DART_BUILD_DIR" -j "$JOBS" -t targets all 2>/dev/null | grep -i "libdart" | head -5 || true
+DART_TARGET=$(ninja -C "$DART_BUILD_DIR" -j "$JOBS" -t targets all 2>/dev/null | grep -E "^(runtime/|//runtime:)?libdart[^:]*:" | head -1 | cut -d: -f1)
+if [ -z "$DART_TARGET" ]; then
+    # Fallback: build 'dart' executable which depends on the library
+    echo "No libdart target found, building 'dart'..."
+    ninja -C "$DART_BUILD_DIR" -j "$JOBS" dart
+else
+    echo "Using target: $DART_TARGET"
+    ninja -C "$DART_BUILD_DIR" -j "$JOBS" "$DART_TARGET"
+fi
 
 # Find the static library
 DARTVM_LIB=$(find "$DART_BUILD_DIR" -name "libdart*.a" 2>/dev/null | head -1)
