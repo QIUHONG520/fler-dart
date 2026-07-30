@@ -1,0 +1,132 @@
+name: Build dartvm.so
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dart-version:
+        description: 'Build single version (empty = all 4)'
+        required: false
+        type: string
+      ndk-version:
+        description: 'Android NDK version'
+        required: false
+        default: 'r27'
+        type: string
+
+env:
+  NDK_VERSION: ${{ inputs.ndk-version || 'r27' }}
+
+jobs:
+  build:
+    name: dartvm ${{ matrix.dart-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dart-version:
+          - '3.7.0'
+          - '3.10.0'
+          - '3.12.1'
+          - '3.12.2'
+    if: ${{ !inputs.dart-version || inputs.dart-version == matrix.dart-version }}
+
+    steps:
+      - name: Checkout fler-dart
+        uses: actions/checkout@v4
+        with:
+          path: fler-dart
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build python3 python3-pip \
+            curl git file lld
+
+      - name: Setup Android NDK ${{ env.NDK_VERSION }}
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+
+      - name: Cache Dart VM build artifacts
+        id: cache-dartvm
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/fler-dart-cache/dartvm_${{ matrix.dart-version }}
+            /tmp/fler-dart-cache/sdk-dart-${{ matrix.dart-version }}
+          key: dartvm-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-${{ hashFiles('fler-dart/scripts/build-dartvm.sh') }}
+
+      - name: Build dartvm.so
+        run: |
+          mkdir -p output
+          bash fler-dart/scripts/build-dartvm.sh \
+            --dart-version ${{ matrix.dart-version }} \
+            --ndk-path $ANDROID_NDK_HOME \
+            --output-dir "$(pwd)/output" \
+            --build-root "/tmp/fler-dart-cache/dartvm_${{ matrix.dart-version }}"
+
+      - name: Verify output
+        run: |
+          ls -lh output/
+          file output/dartvm_${{ matrix.dart-version }}_android_arm64.so || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dartvm_${{ matrix.dart-version }}_android_arm64
+          path: output/dartvm_${{ matrix.dart-version }}_android_arm64.so
+
+  release:
+    name: Create Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          for dir in dartvm_*_android_arm64/; do
+            [ -d "$dir" ] || continue
+            cp "$dir"/*.so release-assets/
+          done
+          ls -lh release-assets/
+
+      - name: Generate checksums
+        run: |
+          cd release-assets
+          sha256sum *.so > checksums.txt
+          cat checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: dartvm ${{ github.ref_name }}
+          body: |
+            ## dartvm.so Release ${{ github.ref_name }}
+
+            Prebuilt dartvm.so for Android ARM64 (arm64-v8a).
+
+            | File | Dart | Size |
+            |------|------|------|
+            $(for f in release-assets/dartvm_*.so; do
+              name=$(basename "$f")
+              ver=$(echo "$name" | sed 's/dartvm_\(.*\)_android_arm64.so/\1/')
+              size=$(ls -lh "$f" | awk '{print $5}')
+              echo "| \`$name\` | $ver | $size |"
+            done)
+
+            ### Usage
+
+            Place `.so` in `Fler/cache/dartvm/` on device.
+          files: |
+            release-assets/*.so
+            release-assets/checksums.txt
