@@ -182,14 +182,6 @@ target_compile_options(dartvm PRIVATE
     -fno-omit-frame-pointer
 )
 
-# Force-include atomic_ref compatibility layer (NDK r27's libc++
-# may not expose std::atomic_ref; this provides a builtin-based fallback)
-if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    target_compile_options(dartvm PRIVATE
-        "$<$<COMPILE_LANGUAGE:CXX>:-include;${CMAKE_CURRENT_SOURCE_DIR}/src/atomic_ref_compat.h>"
-    )
-endif()
-
 # ─── Precompiled header (CXX only; pch.h contains C++ headers) ───
 if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     target_precompile_headers(dartvm PRIVATE
