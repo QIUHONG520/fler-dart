@@ -8,9 +8,10 @@ project(dartvm C CXX)
 # DARTVM_STATIC_LIB   - path to libdart*.a (direct or from packages/)
 # DART_INCLUDE_DIR    - optional override for Dart headers
 # DART_VERSION        - e.g. "3.12.2"
-# CAPSTONE_STATIC_LIB  - path to prebuilt libcapstone.a
+# CAPSTONE_LIB        - path to libcapstone.so (dynamic linking)
 # CAPSTONE_INCLUDE_DIR - path to capstone headers
 # SQLITE_DIR          - path to SQLite amalgamation
+# USE_SHARED_CAPSTONE - set to ON when linking against shared capstone
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,8 +21,8 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 if(NOT DARTVM_STATIC_LIB)
     message(FATAL_ERROR "DARTVM_STATIC_LIB required")
 endif()
-if(NOT CAPSTONE_STATIC_LIB)
-    message(FATAL_ERROR "CAPSTONE_STATIC_LIB required")
+if(NOT CAPSTONE_LIB AND NOT CAPSTONE_STATIC_LIB)
+    message(FATAL_ERROR "CAPSTONE_LIB or CAPSTONE_STATIC_LIB required")
 endif()
 if(NOT BLUTTER_SRC_DIR)
     message(FATAL_ERROR "BLUTTER_SRC_DIR required")
@@ -160,11 +161,52 @@ if(UNIFORM_INTEGER_ACCESS)
 endif()
 
 # ─── Link libraries ───
+# Core: static DartVM (version-specific) + dynamic shared libs
 target_link_libraries(dartvm PRIVATE
     "${DARTVM_STATIC_LIB}"
-    "${CAPSTONE_STATIC_LIB}"
     atomic log z
 )
+
+# Capstone: dynamic or static based on USE_SHARED_CAPSTONE
+if(USE_SHARED_CAPSTONE)
+    target_link_libraries(dartvm PRIVATE "${CAPSTONE_LIB}")
+elseif(CAPSTONE_LIB)
+    target_link_libraries(dartvm PRIVATE "${CAPSTONE_LIB}")
+else()
+    target_link_libraries(dartvm PRIVATE "${CAPSTONE_STATIC_LIB}")
+endif()
+
+# ICU: dynamic linking on Android (shared across all Dart versions)
+# ICU_DIR is passed by build-dartvm.sh via -DICU_DIR=...; only fallback
+# to source-adjacent path if not provided (do NOT use set() which would
+# shadow the cache variable).
+if(ANDROID)
+    if(NOT ICU_DIR)
+        set(ICU_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../icu")
+    endif()
+    if(EXISTS "${ICU_DIR}/lib/libicuuc.so")
+        add_library(icuuc SHARED IMPORTED)
+        set_target_properties(icuuc PROPERTIES
+            IMPORTED_LOCATION "${ICU_DIR}/lib/libicuuc.so"
+            INTERFACE_INCLUDE_DIRECTORIES "${ICU_DIR}/include"
+        )
+        target_link_libraries(dartvm PRIVATE icuuc)
+    endif()
+    if(EXISTS "${ICU_DIR}/lib/libicudata.so")
+        add_library(icudata SHARED IMPORTED)
+        set_target_properties(icudata PROPERTIES
+            IMPORTED_LOCATION "${ICU_DIR}/lib/libicudata.so"
+        )
+        target_link_libraries(dartvm PRIVATE icudata)
+    endif()
+endif()
+
+# ─── Runtime path: ensure shared libs found at runtime ───
+if(ANDROID)
+    set_target_properties(dartvm PROPERTIES
+        LINK_FLAGS "-Wl,-rpath,\$ORIGIN"
+    )
+endif()
 
 # ─── Compile options ───
 target_compile_options(dartvm PRIVATE
