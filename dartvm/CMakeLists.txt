@@ -3,26 +3,20 @@ project(dartvm C CXX)
 
 # ─── Input variables (set by build-dartvm.sh) ───
 # BLUTTER_SRC_DIR     - path to blutter/src/ (contains all .cpp/.h)
-# DART_INCLUDE_DIR    - path to Dart SDK runtime/ dir (for <include/xxx.h>, <vm/xxx.h>)
-# DARTVM_STATIC_LIB   - path to libdart*.a from official GN build
+# DARTVM_PACKAGES     - path to blutter's packages/ dir (dartvm_fetch_build.py output)
+# DARTVM_LIB_NAME     - e.g. "dartvm3.12.2_android_arm64"
+# DARTVM_STATIC_LIB   - path to libdart*.a (direct or from packages/)
+# DART_INCLUDE_DIR    - optional override for Dart headers
 # DART_VERSION        - e.g. "3.12.2"
 # CAPSTONE_STATIC_LIB  - path to prebuilt libcapstone.a
 # CAPSTONE_INCLUDE_DIR - path to capstone headers
 # SQLITE_DIR          - path to SQLite amalgamation
-#
-# Version-specific defines (from Blutter's pch.h):
-# OLD_MAP_SET_NAME, NO_LAST_INTERNAL_ONLY_CID, HAS_SHARED_CLASS_TABLE,
-# HAS_RECORD_TYPE, NO_INIT_LATE_STATIC_FIELD,
-# NO_METHOD_EXTRACTOR_STUB, UNIFORM_INTEGER_ACCESS, NO_CODE_ANALYSIS
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ─── Validate inputs ───
-if(NOT DART_INCLUDE_DIR)
-    message(FATAL_ERROR "DART_INCLUDE_DIR required (path to Dart SDK runtime/)")
-endif()
 if(NOT DARTVM_STATIC_LIB)
     message(FATAL_ERROR "DARTVM_STATIC_LIB required")
 endif()
@@ -31,6 +25,21 @@ if(NOT CAPSTONE_STATIC_LIB)
 endif()
 if(NOT BLUTTER_SRC_DIR)
     message(FATAL_ERROR "BLUTTER_SRC_DIR required")
+endif()
+
+# Determine Dart include dir
+if(NOT DART_INCLUDE_DIR)
+    if(DARTVM_PACKAGES AND DARTVM_LIB_NAME)
+        if(EXISTS "${DARTVM_PACKAGES}/include/${DARTVM_LIB_NAME}")
+            set(DART_INCLUDE_DIR "${DARTVM_PACKAGES}/include/${DARTVM_LIB_NAME}")
+        else()
+            file(GLOB _dartvm_inc "${DARTVM_PACKAGES}/include/dartvm*")
+            list(GET _dartvm_inc 0 DART_INCLUDE_DIR)
+        endif()
+    endif()
+endif()
+if(NOT DART_INCLUDE_DIR)
+    message(FATAL_ERROR "DART_INCLUDE_DIR not determined (set DARTVM_PACKAGES or DART_INCLUDE_DIR)")
 endif()
 
 message(STATUS "Dart VM lib:     ${DARTVM_STATIC_LIB}")

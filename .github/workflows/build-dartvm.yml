@@ -39,24 +39,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             cmake ninja-build python3 python3-pip \
-            curl git file lld
-
-      - name: Setup depot_tools (gclient + gn for Dart SDK)
-        run: |
-          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git /tmp/depot_tools
-          echo "/tmp/depot_tools" >> $GITHUB_PATH
+            curl git file libicu-dev
 
       - name: Setup Android NDK ${{ env.NDK_VERSION }}
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: ${{ env.NDK_VERSION }}
 
-      - name: Cache Dart SDK gclient checkout
-        id: cache-dart-sdk
+      - name: Cache Blutter + build artifacts
+        id: cache-dartvm
         uses: actions/cache@v4
         with:
-          path: /tmp/fler-dart-cache/dartvm_${{ matrix.dart-version }}/dart-sdk
-          key: dart-sdk-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v05
+          path: |
+            /tmp/fler-dart-cache/dartvm_${{ matrix.dart-version }}/blutter
+            /tmp/fler-dart-cache/dartvm_${{ matrix.dart-version }}/blutter/packages
+          key: dartvm-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v06
 
       - name: Build dartvm.so
         run: |
@@ -115,8 +112,6 @@ jobs:
             ## dartvm.so Release ${{ github.ref_name }}
 
             Prebuilt dartvm.so for Android ARM64 (arm64-v8a).
-
-            Built with official Dart SDK GN build.
 
               | File | Size |
               |------|------|

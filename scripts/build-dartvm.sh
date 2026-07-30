@@ -1,26 +1,16 @@
 #!/bin/bash
-# ─── Build dartvm.so for Android ARM64 (official Dart GN build) ───
+# ─── Build dartvm.so for Android ARM64 ───
 # Part of fler-dart: standalone dartvm.so build system for Fler.
 #
-# Usage:
-#   ./scripts/build-dartvm.sh --dart-version 3.12.2 \
-#                              --ndk-path /opt/android-ndk-r27 \
-#                              --output-dir ./output
-#
 # Pipeline:
-#   1. gclient sync Dart SDK at target version
-#   2. Build Dart VM static lib for Android ARM64 (official GN + Ninja)
-#   3. Clone Blutter C++ source
-#   4. Cross-compile Capstone static lib for ARM64 (via NDK CMake)
+#   1. Clone Blutter (provides dartvm_fetch_build.py + C++ source)
+#   2. Patch Blutter's CMake template for NDK ARM64 cross-compile
+#   3. dartvm_fetch_build.py: sparse-checkout Dart SDK → CMake → ARM64 .a
+#   4. Cross-compile Capstone static lib for ARM64
 #   5. Compile dartvm.so (Blutter C++ + blutter_entry.cpp + SQLite)
+#   6. Strip → output/dartvm_<version>_android_arm64.so
 
 set -euo pipefail
-
-cleanup() {
-    local ec=$?
-    echo "─── build-dartvm.sh exit code: $ec ───" >&2
-}
-trap cleanup EXIT
 
 DART_VERSION=""
 NDK_PATH="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
@@ -43,8 +33,7 @@ done
 
 if [ -z "$DART_VERSION" ]; then echo "ERROR: --dart-version required"; exit 1; fi
 if [ ! -d "$NDK_PATH" ]; then
-    echo "ERROR: NDK not found at $NDK_PATH"
-    exit 1
+    echo "ERROR: NDK not found at $NDK_PATH"; exit 1
 fi
 
 if [ -z "$BUILD_ROOT" ]; then
@@ -57,66 +46,167 @@ fi
 
 TOOLCHAIN_FILE="$NDK_PATH/build/cmake/android.toolchain.cmake"
 if [ ! -f "$TOOLCHAIN_FILE" ]; then
-    echo "ERROR: NDK toolchain not found at $TOOLCHAIN_FILE"
-    exit 1
+    echo "ERROR: NDK toolchain not found at $TOOLCHAIN_FILE"; exit 1
 fi
 
-DART_SDK_DIR="$BUILD_ROOT/dart-sdk/sdk"
 BLUTTER_DIR="$BUILD_ROOT/blutter"
 CAPSTONE_BUILD_DIR="$BUILD_ROOT/capstone_build"
 DARTVM_SO_BUILD_DIR="$BUILD_ROOT/dartvm_so_build"
 SQLITE_DIR="$BUILD_ROOT/sqlite"
 ARCH_TAG="android_arm64"
 
+cleanup() { [ "${CLEANUP:-0}" = "1" ] && rm -rf "$BUILD_ROOT"; }
+trap cleanup EXIT
+
 echo "════════════════════════════════════════════"
-echo " fler-dart: dartvm.so Build (official Dart GN)"
+echo " fler-dart: dartvm.so Build (dartvm_fetch_build.py + NDK)"
 echo " Dart version: $DART_VERSION"
 echo " NDK:          $NDK_PATH"
 echo " Build root:   $BUILD_ROOT"
 echo "════════════════════════════════════════════"
 
 # ═══════════════════════════════════════════════
-# Step 1: gclient sync Dart SDK
+# Step 1: Clone Blutter
 # ═══════════════════════════════════════════════
 echo ""
-echo "─── [1/4] Syncing Dart SDK v$DART_VERSION ───"
+echo "─── [1/5] Cloning Blutter ───"
+if [ ! -d "$BLUTTER_DIR" ]; then
+    git clone --depth 1 "$BLUTTER_REPO" "$BLUTTER_DIR"
+fi
+echo "Blutter: $BLUTTER_DIR"
 
-DART_SDK_ROOT="$BUILD_ROOT/dart-sdk"
-if [ ! -d "$DART_SDK_DIR" ]; then
-    mkdir -p "$DART_SDK_ROOT"
-    cd "$DART_SDK_ROOT"
+# ═══════════════════════════════════════════════
+# Step 1b: Patch Blutter's CMake template for ARM64 cross-compile
+# ═══════════════════════════════════════════════
+echo ""
+echo "─── [1b] Patching CMake template for NDK cross-compile ───"
 
-    # Create .gclient for Android targeting
-    cat > .gclient << EOF
-solutions = [
-  {
-    "name": "sdk",
-    "url": "https://dart.googlesource.com/sdk.git",
-    "deps_file": "DEPS",
-    "managed": False,
-    "custom_deps": {},
-  },
-]
-target_os = ["android"]
-EOF
+BLUTTER_TEMPLATE="$BLUTTER_DIR/scripts/CMakeLists.txt"
 
-    echo "Running gclient sync (this may take a while on first run)..."
-    gclient sync --no-history -j "$JOBS"
+if [ ! -f "$BLUTTER_TEMPLATE.patched" ]; then
+    cp "$BLUTTER_TEMPLATE" "$BLUTTER_TEMPLATE.orig"
+    
+    # Insert NDK toolchain detection after the project() command
+    # and make ICU optional when cross-compiling
+    python3 -c "
+import re
 
-    cd sdk
-    git fetch --tags
-    git checkout "tags/$DART_VERSION"
-    cd "$DART_SDK_ROOT"
-    gclient sync -D --no-history -j "$JOBS"
+with open('$BLUTTER_TEMPLATE', 'r') as f:
+    content = f.read()
+
+# 1. After cmake_minimum_required + project(), inject NDK toolchain
+ndk_block = '''
+# [fler-dart] NDK cross-compile injection
+if(DEFINED ENV{FLER_NDK} AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+    set(CMAKE_TOOLCHAIN_FILE \"\$ENV{FLER_NDK}/build/cmake/android.toolchain.cmake\")
+    set(ANDROID_ABI arm64-v8a)
+    set(ANDROID_PLATFORM android-24)
+    set(ANDROID_STL c++_static)
+    message(STATUS \"fler-dart: Using NDK toolchain \$ENV{FLER_NDK}\")
+endif()
+'''
+content = re.sub(
+    r'(project\(dartvmVERSION_PLACE_HOLDER\).*?\n)',
+    r'\1' + ndk_block,
+    content, count=1
+)
+
+# 2. Make ICU optional when cross-compiling (system ICU is x86_64)
+icu_optional = '''if(ANDROID)
+    message(STATUS \"Skipping ICU find for Android cross-compile (headers from system)\")
+    find_package(ICU QUIET uc)
+    if(NOT ICU_FOUND)
+        set(ICU_LIBRARIES \"\")
+        set(ICU_INCLUDE_DIRS \"\")
+    endif()
+else()
+    find_package(ICU REQUIRED uc)
+endif()'''
+content = content.replace('find_package(ICU REQUIRED uc)', icu_optional)
+
+# 3. Android link flags (atomic, log instead of dl, pthread)
+android_link = '''if(ANDROID)
+    target_link_libraries(\${LIBNAME} PUBLIC atomic log \${ICU_LIBRARIES})
+elseif(MSVC)
+    target_link_libraries(\${LIBNAME} PUBLIC \${ICU_LIBRARIES})
+else()
+    target_link_libraries(\${LIBNAME} PUBLIC dl pthread \${ICU_LIBRARIES})
+endif()'''
+old_link = '''if (MSVC)
+\ttarget_link_libraries(\${LIBNAME} PUBLIC \${ICU_LIBRARIES})
+else()
+\ttarget_link_libraries(\${LIBNAME} PUBLIC dl pthread \${ICU_LIBRARIES})
+endif()'''
+content = content.replace(old_link, android_link)
+
+with open('$BLUTTER_TEMPLATE', 'w') as f:
+    f.write(content)
+print('Template patched for NDK cross-compile')
+"
+    touch "$BLUTTER_TEMPLATE.patched"
 else
-    echo "Dart SDK already present at $DART_SDK_DIR"
+    echo "Template already patched"
 fi
 
 # ═══════════════════════════════════════════════
-# Step 1b: Determine version-specific defines
+# Step 2: Run dartvm_fetch_build.py (with NDK env)
 # ═══════════════════════════════════════════════
 echo ""
-echo "─── [1b] Detecting version-specific defines ───"
+echo "─── [2/5] Building Dart VM static lib via dartvm_fetch_build.py ───"
+
+cd "$BLUTTER_DIR"
+pip install -q -r requirements.txt 2>/dev/null || true
+
+echo "Exporting NDK for dartvm_fetch_build.py..."
+export ANDROID_NDK_HOME="$NDK_PATH"
+export ANDROID_NDK_ROOT="$NDK_PATH"
+export FLER_NDK="$NDK_PATH"
+
+# Determine snapshot hash from installed packages for cache key
+SNAPSHOT_HASH=""
+DARMVM_LIB_NAME="dartvm${DART_VERSION}_android_arm64"
+PACKAGES_DIR="$BLUTTER_DIR/packages"
+PACKAGES_LIB="$PACKAGES_DIR/lib/$DARMVM_LIB_NAME/lib$DARMVM_LIB_NAME.a"
+
+if [ -f "$PACKAGES_LIB" ]; then
+    echo "Pre-built Dart VM lib found: $PACKAGES_LIB"
+    DARTVM_LIB="$PACKAGES_LIB"
+    DARTVM_INCLUDE_DIR="$PACKAGES_DIR/include/$DARMVM_LIB_NAME"
+else
+    echo "Running dartvm_fetch_build.py $DART_VERSION android arm64..."
+    python3 dartvm_fetch_build.py "$DART_VERSION" android arm64
+
+    DARTVM_LIB=$(find "$PACKAGES_DIR/lib" -name "*.a" 2>/dev/null | head -1 || true)
+    DARTVM_INCLUDE_DIR=$(find "$PACKAGES_DIR/include" -maxdepth 1 -type d -name "dartvm*" 2>/dev/null | head -1 || true)
+fi
+
+if [ -z "$DARTVM_LIB" ] || [ ! -f "$DARTVM_LIB" ]; then
+    echo "ERROR: Dart VM static lib not found in packages/lib/"
+    exit 1
+fi
+if [ -z "$DARTVM_INCLUDE_DIR" ] || [ ! -d "$DARTVM_INCLUDE_DIR" ]; then
+    echo "ERROR: Dart VM headers not found in packages/include/"
+    exit 1
+fi
+
+echo "Dart VM lib: $DARTVM_LIB"
+echo "  size: $(ls -lh "$DARTVM_LIB" | awk '{print $5}')"
+echo "Dart include: $DARTVM_INCLUDE_DIR"
+
+# Verify ARM64
+if command -v file > /dev/null; then
+    FILE_OUT=$(file "$DARTVM_LIB" 2>/dev/null || true)
+    if echo "$FILE_OUT" | grep -qi "ARM\|aarch64"; then
+        echo "  Architecture: ARM64 ✓"
+    else
+        echo "  WARNING: $(echo "$FILE_OUT" | head -1)"
+        echo "  May be x86_64. NDK cross-compile may have failed."
+    fi
+fi
+
+# ═══════════════════════════════════════════════
+# Step 2b: Version-specific defines
+# ═══════════════════════════════════════════════
 VER_MAJOR=$(echo "$DART_VERSION" | cut -d. -f1)
 VER_MINOR=$(echo "$DART_VERSION" | cut -d. -f2)
 
@@ -137,71 +227,7 @@ fi
 echo "Version defines: $VERSION_DEFINES"
 
 # ═══════════════════════════════════════════════
-# Step 2: Build Dart VM static lib via official GN
-# ═══════════════════════════════════════════════
-echo ""
-echo "─── [2/4] Building Dart VM static lib (ARM64) ───"
-
-cd "$DART_SDK_DIR"
-
-export ANDROID_NDK_HOME="$NDK_PATH"
-export ANDROID_NDK_ROOT="$NDK_PATH"
-
-# Generate GN build files for Android ARM64
-DART_BUILD_DIR="out/ReleaseAndroidARM64"
-
-# Dart SDK's GN expects NDK at third_party/android_tools/ndk.
-# Create symlink to the system NDK instead of using GN args.
-mkdir -p third_party/android_tools
-if [ ! -L third_party/android_tools/ndk ]; then
-    ln -s "$NDK_PATH" third_party/android_tools/ndk
-fi
-
-if [ ! -f "$DART_BUILD_DIR/build.ninja" ]; then
-    echo "Generating GN build files..."
-    python3 tools/gn.py -m release -a arm64 --os android --no-git-version --no-verify-sdk-hash
-fi
-
-echo "Building libdart (finding correct target)..."
-# List available static library targets
-NINJA_TARGETS=$(ninja -C "$DART_BUILD_DIR" -j "$JOBS" -t targets all 2>/dev/null)
-
-# Find the main static lib target (not the shared lib which has macOS -install_name)
-DART_TARGET=$(echo "$NINJA_TARGETS" | grep -E "obj/runtime/libdart\.a:" | head -1 | cut -d: -f1 || true)
-
-if [ -z "$DART_TARGET" ]; then
-    # Try to find any static libdart target
-    DART_TARGET=$(echo "$NINJA_TARGETS" | grep -E "runtime.*libdart.*\.a:" | grep -v "dart_jit\|dart_precompiled" | head -1 | cut -d: -f1 || true)
-fi
-
-if [ -z "$DART_TARGET" ]; then
-    # Build sub-targets: vm, lib, platform
-    echo "Building sub-targets: vm/libdart_vm, vm/libdart_lib, platform/libdart_platform"
-    ninja -C "$DART_BUILD_DIR" -j "$JOBS" \
-        "vm:libdart_vm" \
-        "vm:libdart_lib" \
-        "platform:libdart_platform" \
-        "../third_party/double-conversion/src:libdouble_conversion"
-else
-    echo "Using target: $DART_TARGET"
-    ninja -C "$DART_BUILD_DIR" -j "$JOBS" "$DART_TARGET"
-fi
-
-# Find the static library (may be in obj/ subdirs)
-DARTVM_LIB=$(find "$DART_BUILD_DIR" -name "libdart_vm*.a" -o -name "libdart.a" 2>/dev/null | head -1 || true)
-if [ -z "$DARTVM_LIB" ]; then
-    DARTVM_LIB=$(find "$DART_BUILD_DIR/obj" -name "libdart*.a" 2>/dev/null | head -1 || true)
-fi
-if [ -z "$DARTVM_LIB" ]; then
-    echo "ERROR: Cannot find libdart*.a in $DART_BUILD_DIR"
-    exit 1
-fi
-
-echo "Dart VM static lib: $DARTVM_LIB"
-echo "  size: $(ls -lh "$DARTVM_LIB" | awk '{print $5}')"
-
-# ═══════════════════════════════════════════════
-# Step 2b: Download SQLite amalgamation
+# Step 2c: Download SQLite amalgamation
 # ═══════════════════════════════════════════════
 if [ ! -f "$SQLITE_DIR/sqlite3.c" ]; then
     echo "Downloading SQLite amalgamation..."
@@ -215,48 +241,10 @@ if [ ! -f "$SQLITE_DIR/sqlite3.c" ]; then
 fi
 
 # ═══════════════════════════════════════════════
-# Step 2c: Clone Blutter (C++ source only)
-# ═══════════════════════════════════════════════
-echo ""
-echo "─── [2c] Cloning Blutter ───"
-if [ ! -d "$BLUTTER_DIR" ]; then
-    git clone --depth 1 "$BLUTTER_REPO" "$BLUTTER_DIR"
-fi
-echo "Blutter: $BLUTTER_DIR"
-
-# Patch Blutter for Dart SDK API compat
-# Dart SDK's Closure class lacks entry_point(); use Function::entry_point() instead.
-BLUTTER_DARTAPP="$BLUTTER_DIR/blutter/src/DartApp.cpp"
-if grep -q "closure\.entry_point()" "$BLUTTER_DARTAPP" 2>/dev/null; then
-    echo "Patching Blutter: closure.entry_point() → func.entry_point()"
-    python3 -c "
-import re
-with open('$BLUTTER_DARTAPP', 'r') as f:
-    c = f.read()
-# Replace: closure.entry_point() lines → func.entry_point() after Handle
-c, n = re.subn(
-    r'(const auto ep_addr = )closure\.entry_point\(\)( - base\(\);)\s+(const auto& func = dart::Function::Handle\(closure\.function\(\)\);)',
-    r'\3\n\t\tconst auto ep_addr = func.entry_point()\2',
-    c
-)
-if n == 0:
-    # Try alternate indentation
-    c, n = re.subn(
-        r'(const auto ep_addr = )closure\.entry_point\(\)( - base\(\);)\s+(const auto& func = dart::Function::Handle\(closure\.function\(\)\);)',
-        r'\3\n            const auto ep_addr = func.entry_point()\2',
-        c
-    )
-print(f'Patched {n} occurrence(s)')
-with open('$BLUTTER_DARTAPP', 'w') as f:
-    f.write(c)
-"
-fi
-
-# ═══════════════════════════════════════════════
 # Step 3: Build Capstone static lib for ARM64
 # ═══════════════════════════════════════════════
 echo ""
-echo "─── [3/4] Building Capstone static lib (ARM64) ───"
+echo "─── [3/5] Building Capstone static lib (ARM64) ───"
 
 CAPSTONE_SRC="$BUILD_ROOT/capstone-src"
 if [ ! -d "$CAPSTONE_SRC" ]; then
@@ -279,7 +267,7 @@ cmake -G Ninja \
     -DCAPSTONE_ARCHITECTURES="aarch64" \
     "$CAPSTONE_SRC"
 cmake --build . -j "$JOBS"
-CAPSTONE_LIB=$(find "$CAPSTONE_BUILD_DIR" -name "libcapstone.a" 2>/dev/null | head -1)
+CAPSTONE_LIB=$(find "$CAPSTONE_BUILD_DIR" -name "libcapstone.a" 2>/dev/null | head -1 || true)
 CAPSTONE_INCLUDE_DIR="$CAPSTONE_SRC/include/capstone"
 echo "Capstone: $CAPSTONE_LIB"
 
@@ -287,12 +275,9 @@ echo "Capstone: $CAPSTONE_LIB"
 # Step 4: Build dartvm.so
 # ═══════════════════════════════════════════════
 echo ""
-echo "─── [4/4] Building dartvm.so ───"
+echo "─── [4/5] Building dartvm.so ───"
 mkdir -p "$DARTVM_SO_BUILD_DIR"
 cd "$DARTVM_SO_BUILD_DIR"
-
-# Include path: Dart SDK runtime/ provides both <include/xxx.h> and <vm/xxx.h>
-DART_INCLUDE_DIR="$DART_SDK_DIR/runtime"
 
 cmake -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
@@ -301,9 +286,10 @@ cmake -G Ninja \
     -DANDROID_PLATFORM=android-24 \
     -DANDROID_STL=c++_static \
     -DDART_VERSION="$DART_VERSION" \
-    -DDART_INCLUDE_DIR="$DART_INCLUDE_DIR" \
-    -DDARTVM_STATIC_LIB="$DARTVM_LIB" \
     -DBLUTTER_SRC_DIR="$BLUTTER_DIR/blutter/src" \
+    -DDARTVM_PACKAGES="$PACKAGES_DIR" \
+    -DDARTVM_LIB_NAME="$DARMVM_LIB_NAME" \
+    -DDARTVM_STATIC_LIB="$DARTVM_LIB" \
     -DCAPSTONE_STATIC_LIB="$CAPSTONE_LIB" \
     -DCAPSTONE_INCLUDE_DIR="$CAPSTONE_INCLUDE_DIR" \
     -DSQLITE_DIR="$SQLITE_DIR" \
