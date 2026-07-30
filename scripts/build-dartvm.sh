@@ -182,10 +182,10 @@ c = c.replace(
     "if(ANDROID)\n\ttarget_link_libraries(${LIBNAME} PUBLIC atomic log ${ICU_LIBRARIES})\nelseif(MSVC)\n\ttarget_link_libraries(${LIBNAME} PUBLIC ${ICU_LIBRARIES})\nelse()\n\ttarget_link_libraries(${LIBNAME} PUBLIC dl pthread ${ICU_LIBRARIES})\nendif()"
 )
 
-# 3. Suppress ICU availability errors (char-predicates.cc uses functions introduced in API 31)
+# 3. Exclude regexp/ dir (missing ICU headers on NDK; not needed for DART_PRECOMPILED_RUNTIME)
 c = c.replace(
-    "set(cc_opts",
-    "set(cc_opts\n\t\t-Wno-unguarded-availability"
+    "include(sourcelist.cmake)\nadd_library",
+    "include(sourcelist.cmake)\nif(ANDROID)\n    list(FILTER SRCS EXCLUDE REGEX \"/regexp/\")\nendif()\nadd_library"
 )
 
 print("  CMake template: patched OK")
