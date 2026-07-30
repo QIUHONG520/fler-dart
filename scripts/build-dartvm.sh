@@ -192,22 +192,6 @@ fi
 # Copy atomic_ref_compat.h to blutter dir (CMake template references it there)
 cp "$REPO_DIR/dartvm/src/atomic_ref_compat.h" "$BLUTTER_DIR/" 2>/dev/null || true
 
-c = c.replace(
-    "target_compile_options(${LIBNAME} PRIVATE ${cc_opts})",
-    "target_compile_options(${LIBNAME} PRIVATE ${cc_opts})\nif(ANDROID)\n    target_compile_options(${LIBNAME} PRIVATE -include \"${PROJECT_SOURCE_DIR}/atomic_ref_compat.h\")\nendif()"
-)
-
-c = c.replace(
-    "if (MSVC)\n\ttarget_link_libraries(${LIBNAME} PUBLIC ${ICU_LIBRARIES})\nelse()\n\ttarget_link_libraries(${LIBNAME} PUBLIC dl pthread ${ICU_LIBRARIES})\nendif()",
-    "if(ANDROID)\n\ttarget_link_libraries(${LIBNAME} PUBLIC atomic log ${ICU_LIBRARIES})\nelseif(MSVC)\n\ttarget_link_libraries(${LIBNAME} PUBLIC ${ICU_LIBRARIES})\nelse()\n\ttarget_link_libraries(${LIBNAME} PUBLIC dl pthread ${ICU_LIBRARIES})\nendif()"
-)
-
-print("  CMake template: patched OK")
-with open(tmpl, 'w') as f:
-    f.write(c)
-PYEOF
-fi
-
 # ═══════════════════════════════════════════════
 # Step 2: Run dartvm_fetch_build.py (with NDK env)
 # ═══════════════════════════════════════════════
