@@ -1,8 +1,4 @@
 #pragma once
-#ifdef __ANDROID__
-#undef __INTRODUCED_IN
-#define __INTRODUCED_IN(x)
-#endif
 #ifdef __cplusplus
 #include <atomic>
 

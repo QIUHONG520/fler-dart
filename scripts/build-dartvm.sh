@@ -183,6 +183,12 @@ c = c.replace(
     "if(ANDROID)\n\ttarget_link_libraries(${LIBNAME} PUBLIC atomic log ${ICU_LIBRARIES})\nelseif(MSVC)\n\ttarget_link_libraries(${LIBNAME} PUBLIC ${ICU_LIBRARIES})\nelse()\n\ttarget_link_libraries(${LIBNAME} PUBLIC dl pthread ${ICU_LIBRARIES})\nendif()"
 )
 
+# 3. Exclude char-predicates.cc (ICU regex) for Android
+c = c.replace(
+    "include(sourcelist.cmake)",
+    "include(sourcelist.cmake)\nif(ANDROID)\n    list(REMOVE_ITEM SRCS \"${SRCDIR}/vm/regexp/char-predicates.cc\")\nendif()"
+)
+
 print("  CMake template: patched OK")
 with open(tmpl, 'w') as f:
     f.write(c)
