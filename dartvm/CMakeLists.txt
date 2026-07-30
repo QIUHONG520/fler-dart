@@ -3,11 +3,11 @@ project(dartvm C CXX)
 
 # ─── Input variables (set by build-dartvm.sh) ───
 # BLUTTER_SRC_DIR     - path to blutter/src/ (contains all .cpp/.h)
-# DARTVM_PACKAGES     - path to blutter's packages/ dir
-# DARTVM_LIB_NAME     - e.g. "dartvm3.12.2_android_arm64"
+# DART_INCLUDE_DIR    - path to Dart SDK runtime/ dir (for <include/xxx.h>, <vm/xxx.h>)
+# DARTVM_STATIC_LIB   - path to libdart*.a from official GN build
+# DART_VERSION        - e.g. "3.12.2"
 # CAPSTONE_STATIC_LIB  - path to prebuilt libcapstone.a
 # CAPSTONE_INCLUDE_DIR - path to capstone headers
-# DART_VERSION        - e.g. "3.12.2"
 # SQLITE_DIR          - path to SQLite amalgamation
 #
 # Version-specific defines (from Blutter's pch.h):
@@ -19,40 +19,30 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# ─── Detect Dart VM lib (before add_library) ───
-if(NOT DARTVM_PACKAGES)
-    set(DARTVM_PACKAGES "${BLUTTER_SRC_DIR}/../packages")
+# ─── Validate inputs ───
+if(NOT DART_INCLUDE_DIR)
+    message(FATAL_ERROR "DART_INCLUDE_DIR required (path to Dart SDK runtime/)")
 endif()
-if(NOT DARTVM_LIB_NAME)
-    message(FATAL_ERROR "DARTVM_LIB_NAME required")
+if(NOT DARTVM_STATIC_LIB)
+    message(FATAL_ERROR "DARTVM_STATIC_LIB required")
 endif()
-
-# DARTVM_STATIC_LIB is set by build-dartvm.sh to the .a path.
-# It may come from packages/ (dartvm_fetch_build.py) or from GN build.
-if(DARTVM_STATIC_LIB)
-    get_filename_component(_dartvm_lib_ext "${DARTVM_STATIC_LIB}" LAST_EXT)
-    if("${_dartvm_lib_ext}" MATCHES "^\\.(a|so)$")
-        message(STATUS "Dart VM lib (direct): ${DARTVM_STATIC_LIB}")
-        set(_DARTVM_USE_DIRECT ON)
-        set(_DARTVM_LIB_TO_LINK "${DARTVM_STATIC_LIB}")
-    endif()
-endif()
-
-if(NOT _DARTVM_USE_DIRECT)
-    find_package(${DARTVM_LIB_NAME} REQUIRED PATHS "${DARTVM_PACKAGES}")
-    message(STATUS "Found Dart VM (package): ${DARTVM_LIB_NAME}")
-    set(_DARTVM_LIB_TO_LINK ${DARTVM_LIB_NAME})
-endif()
-
-# ─── Find Capstone ───
 if(NOT CAPSTONE_STATIC_LIB)
     message(FATAL_ERROR "CAPSTONE_STATIC_LIB required")
 endif()
+if(NOT BLUTTER_SRC_DIR)
+    message(FATAL_ERROR "BLUTTER_SRC_DIR required")
+endif()
+
+message(STATUS "Dart VM lib:     ${DARTVM_STATIC_LIB}")
+message(STATUS "Dart include:    ${DART_INCLUDE_DIR}")
+message(STATUS "Blutter sources: ${BLUTTER_SRC_DIR}")
+
+# ─── Capstone ───
 if(NOT CAPSTONE_INCLUDE_DIR)
     set(CAPSTONE_INCLUDE_DIR "${BLUTTER_SRC_DIR}/../third_party/capstone/include")
 endif()
 
-# ─── Blutter sources (all except main.cpp) ───
+# ─── Blutter sources ───
 set(BLUTTER_SRCS
     ${BLUTTER_SRC_DIR}/CodeAnalyzer.cpp
     ${BLUTTER_SRC_DIR}/CodeAnalyzer_arm64.cpp
@@ -83,9 +73,8 @@ set(SQLITE_SRC "${SQLITE_DIR}/sqlite3.c")
 if(NOT EXISTS ${SQLITE_SRC})
     message(FATAL_ERROR "SQLite amalgamation not found at ${SQLITE_SRC}")
 endif()
-message(STATUS "SQLite: ${SQLITE_SRC}")
 
-# ─── Our files ───
+# ─── Our wrapper ───
 set(DARTVM_SO_SRCS
     ${CMAKE_CURRENT_SOURCE_DIR}/src/blutter_entry.cpp
     ${SQLITE_SRC}
@@ -100,41 +89,17 @@ add_library(dartvm SHARED
 # ─── Include paths ───
 target_include_directories(dartvm PRIVATE
     ${BLUTTER_SRC_DIR}
-)
-
-if(_DARTVM_USE_DIRECT)
-    if(DARTVM_INCLUDE_DIR)
-        target_include_directories(dartvm PRIVATE ${DARTVM_INCLUDE_DIR})
-    elseif(EXISTS "${DARTVM_PACKAGES}/include/${DARTVM_LIB_NAME}")
-        target_include_directories(dartvm PRIVATE "${DARTVM_PACKAGES}/include/${DARTVM_LIB_NAME}")
-    else()
-        target_include_directories(dartvm PRIVATE "${DARTVM_PACKAGES}/include")
-    endif()
-else()
-    get_target_property(_dartvm_inc ${DARTVM_LIB_NAME} INTERFACE_INCLUDE_DIRECTORIES)
-    if(NOT _dartvm_inc)
-        target_include_directories(dartvm PRIVATE
-            "${DARTVM_PACKAGES}/include/${DARTVM_LIB_NAME}"
-        )
-    endif()
-endif()
-
-target_include_directories(dartvm PRIVATE
+    ${DART_INCLUDE_DIR}
     ${CAPSTONE_INCLUDE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${SQLITE_DIR}
 )
 
-# ─── Link libraries ───
-target_link_libraries(dartvm PRIVATE
-    ${_DARTVM_LIB_TO_LINK}
-    ${CAPSTONE_STATIC_LIB}
-)
-
-if(ANDROID)
-    target_link_libraries(dartvm PRIVATE atomic log z dl pthread)
-else()
-    target_link_libraries(dartvm PRIVATE z dl pthread)
+# ─── Force-include atomic_ref compat (NDK r27 libc++ may lack std::atomic_ref) ───
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(dartvm PRIVATE
+        "$<$<COMPILE_LANGUAGE:CXX>:-include;${CMAKE_CURRENT_SOURCE_DIR}/src/atomic_ref_compat.h>"
+    )
 endif()
 
 # ─── Compile definitions ───
@@ -176,19 +141,19 @@ if(UNIFORM_INTEGER_ACCESS)
     target_compile_definitions(dartvm PRIVATE UNIFORM_INTEGER_ACCESS)
 endif()
 
+# ─── Link libraries ───
+target_link_libraries(dartvm PRIVATE
+    "${DARTVM_STATIC_LIB}"
+    "${CAPSTONE_STATIC_LIB}"
+    atomic log z dl pthread
+)
+
 # ─── Compile options ───
 target_compile_options(dartvm PRIVATE
     -O3 -fno-rtti
     -fvisibility=hidden -fvisibility-inlines-hidden
     -fno-omit-frame-pointer
 )
-
-# ─── Force-include atomic_ref compat (NDK r27 libc++ lacks std::atomic_ref) ───
-if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    target_compile_options(dartvm PRIVATE
-        "$<$<COMPILE_LANGUAGE:CXX>:-include;${CMAKE_CURRENT_SOURCE_DIR}/src/atomic_ref_compat.h>"
-    )
-endif()
 
 # ─── Precompiled header (CXX only; pch.h contains C++ headers) ───
 if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
