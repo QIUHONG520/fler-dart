@@ -154,7 +154,7 @@ endif()
 target_link_libraries(dartvm PRIVATE
     "${DARTVM_STATIC_LIB}"
     "${CAPSTONE_STATIC_LIB}"
-    atomic log z dl pthread
+    atomic log z
 )
 
 # ─── Compile options ───
