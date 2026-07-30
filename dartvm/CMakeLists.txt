@@ -140,6 +140,7 @@ endif()
 # ─── Compile definitions ───
 target_compile_definitions(dartvm PRIVATE
     DART_VERSION="${DART_VERSION}"
+    DART_COMPRESSED_POINTERS
     SQLITE_THREADSAFE=0
     SQLITE_OMIT_LOAD_EXTENSION
     NDEBUG
