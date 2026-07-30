@@ -76,10 +76,36 @@ fi
 echo "Blutter: $BLUTTER_DIR"
 
 # ═══════════════════════════════════════════════
-# Step 1b: Patch Blutter's CMake template for ARM64 cross-compile
+# Step 1b: Patch Blutter source for Dart 3.12.x API compat
 # ═══════════════════════════════════════════════
 echo ""
-echo "─── [1b] Patching CMake template for NDK cross-compile ───"
+echo "─── [1b] Patching Blutter for Dart SDK API compat ───"
+
+BLUTTER_DARTAPP="$BLUTTER_DIR/blutter/src/DartApp.cpp"
+if grep -q "closure\.entry_point()" "$BLUTTER_DARTAPP" 2>/dev/null; then
+    echo "Patching: closure.entry_point() → func.entry_point()"
+    python3 -c "
+import re
+with open('$BLUTTER_DARTAPP', 'r') as f:
+    c = f.read()
+# Dart 3.12.x: Closure has no entry_point(). Access via the underlying Function.
+c, n = re.subn(
+    r'const auto ep_addr = closure\.entry_point\(\) - base\(\);'
+    r'\s+const auto& func = dart::Function::Handle\(closure\.function\(\)\);',
+    r'const auto\& func = dart::Function::Handle(closure.function());\n\t\t\tconst auto ep_addr = func.entry_point() - base();',
+    c
+)
+print(f'Patched {n} occurrences')
+with open('$BLUTTER_DARTAPP', 'w') as f:
+    f.write(c)
+"
+fi
+
+# ═══════════════════════════════════════════════
+# Step 1c: Patch Blutter's CMake template for ARM64 cross-compile
+# ═══════════════════════════════════════════════
+echo ""
+echo "─── [1c] Patching CMake template for NDK cross-compile ───"
 
 BLUTTER_TEMPLATE="$BLUTTER_DIR/scripts/CMakeLists.txt"
 

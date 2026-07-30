@@ -53,7 +53,7 @@ jobs:
           path: |
             /tmp/fler-dart-cache/dartvm_${{ matrix.dart-version }}/blutter
             /tmp/fler-dart-cache/dartvm_${{ matrix.dart-version }}/blutter/packages
-          key: dartvm-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v06
+          key: dartvm-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v07
 
       - name: Build dartvm.so
         run: |
