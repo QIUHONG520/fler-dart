@@ -42,7 +42,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             cmake ninja-build python3 python3-pip \
-            curl git file lld
+            curl git file lld libicu-dev
 
       - name: Setup Android NDK ${{ env.NDK_VERSION }}
         uses: nttld/setup-ndk@v1
@@ -70,13 +70,15 @@ jobs:
       - name: Verify output
         run: |
           ls -lh output/
-          file output/dartvm_${{ matrix.dart-version }}_android_arm64.so || true
+          for f in output/dartvm_*.so; do
+            [ -f "$f" ] && file "$f"
+          done
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dartvm_${{ matrix.dart-version }}_android_arm64
-          path: output/dartvm_${{ matrix.dart-version }}_android_arm64.so
+          name: dartvm_${{ matrix.dart-version }}
+          path: output/dartvm_${{ matrix.dart-version }}_*.so
 
   release:
     name: Create Release
@@ -93,7 +95,7 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release-assets
-          for dir in dartvm_*_android_arm64/; do
+          for dir in dartvm_*/; do
             [ -d "$dir" ] || continue
             cp "$dir"/*.so release-assets/
           done
@@ -114,13 +116,12 @@ jobs:
 
             Prebuilt dartvm.so for Android ARM64 (arm64-v8a).
 
-            | File | Dart | Size |
-            |------|------|------|
+              | File | Size |
+              |------|------|
             $(for f in release-assets/dartvm_*.so; do
               name=$(basename "$f")
-              ver=$(echo "$name" | sed 's/dartvm_\(.*\)_android_arm64.so/\1/')
               size=$(ls -lh "$f" | awk '{print $5}')
-              echo "| \`$name\` | $ver | $size |"
+              echo "| \`$name\` | $size |"
             done)
 
             ### Usage

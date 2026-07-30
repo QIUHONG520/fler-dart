@@ -11,9 +11,10 @@
 #   1. Clone Blutter repo
 #   2. Checkout Dart SDK source for target version
 #   3. Cross-compile Dart VM static lib for Android ARM64 (via NDK)
-#   4. Cross-compile Capstone static lib for Android ARM64 (via NDK)
+#      Falls back to host build if NDK fails (e.g. ICU not available for cross-compile)
+#   4. Cross-compile Capstone static lib (same arch as dartvm)
 #   5. Compile dartvm.so (Blutter C++ + blutter_entry.cpp + SQLite)
-#   6. Strip → output/dartvm_<version>_android_arm64.so
+#   6. Strip → output/dartvm_<version>_<arch>.so
 
 set -euo pipefail
 
@@ -59,13 +60,11 @@ fi
 
 BLUTTER_DIR="$BUILD_ROOT/blutter"
 PACKAGES_DIR="$BLUTTER_DIR/packages"
-DARTVM_LIB_NAME="dartvm${DART_VERSION}_android_arm64"
 DARTVM_BUILD_DIR="$BUILD_ROOT/dartvm_build"
 CAPSTONE_BUILD_DIR="$BUILD_ROOT/capstone_build"
 DARTVM_SO_BUILD_DIR="$BUILD_ROOT/dartvm_so_build"
 INSTALL_DIR="$BUILD_ROOT/install"
 SQLITE_DIR="$BUILD_ROOT/sqlite"
-OUTPUT_FILE="$OUTPUT_DIR/dartvm_${DART_VERSION}_android_arm64.so"
 
 TOOLCHAIN_FILE="$NDK_PATH/build/cmake/android.toolchain.cmake"
 if [ ! -f "$TOOLCHAIN_FILE" ]; then
@@ -76,12 +75,20 @@ fi
 cleanup() { [ "$CLEANUP" = "1" ] && rm -rf "$BUILD_ROOT"; }
 trap cleanup EXIT
 
+# ═══════════════════════════════════════════════
+# Architecture detection
+# ═══════════════════════════════════════════════
+
+USE_NDK=true
+ARCH_TAG="android_arm64"
+# Must match what dartvm_fetch_build.py generates in packages/
+DARTVM_LIB_NAME="dartvm${DART_VERSION}_android_arm64"
+
 echo "════════════════════════════════════════════"
 echo " fler-dart: dartvm.so Build"
 echo " Dart version: $DART_VERSION"
 echo " NDK:          $NDK_PATH"
 echo " Build root:   $BUILD_ROOT"
-echo " Output:       $OUTPUT_FILE"
 echo "════════════════════════════════════════════"
 
 # ═══════════════════════════════════════════════
@@ -151,52 +158,65 @@ if [ ! -f "$SQLITE_DIR/sqlite3.c" ]; then
 fi
 
 # ═══════════════════════════════════════════════
-# Step 3: Build Dart VM static lib for Android ARM64
+# Step 3: Build Dart VM static lib
 # ═══════════════════════════════════════════════
 echo ""
-echo "─── [3/5] Building Dart VM static lib for Android ARM64 ───"
+echo "─── [3/5] Building Dart VM static lib ───"
 mkdir -p "$DARTVM_BUILD_DIR"
 cd "$DARTVM_BUILD_DIR"
-cmake -G Ninja \
+
+echo "Trying NDK cross-compile for Android ARM64..."
+if cmake -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
     -DCMAKE_BUILD_TYPE=Release \
     -DANDROID_ABI=arm64-v8a \
     -DANDROID_PLATFORM=android-24 \
     -DANDROID_STL=c++_static \
     -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR" \
-    "$SDK_DIR"
-cmake --build . -j "$JOBS" 2>&1 || {
-    echo "WARNING: NDK cross-compile failed. Falling back to host-built dartvm."
-    FALLBACK=$(find "$PACKAGES_DIR/lib" -name "*.a" 2>/dev/null | head -1)
-    if [ -n "$FALLBACK" ]; then
-        DARTVM_LIB="$FALLBACK"
-    else
-        echo "ERROR: No dartvm static lib found"
+    "$SDK_DIR" > /dev/null 2>&1 && \
+    cmake --build . -j "$JOBS" > /dev/null 2>&1; then
+    DARTVM_LIB=$(find "$DARTVM_BUILD_DIR" -name "*.a" 2>/dev/null | head -1)
+    echo "Dart VM static lib: $DARTVM_LIB (Android ARM64)"
+else
+    echo "WARNING: NDK cross-compile failed (likely ICU). Building for host instead."
+    USE_NDK=false
+    ARCH_TAG="linux_x86_64"
+    # CMake package name stays as-is (matching packages/), just link with host toolchain
+    # Use the host-built dartvm from Blutter's packages/
+    DARTVM_LIB=$(find "$PACKAGES_DIR/lib" -name "*.a" 2>/dev/null | head -1)
+    if [ -z "$DARTVM_LIB" ]; then
+        echo "ERROR: No host dartvm static lib found in packages/"
         exit 1
     fi
-}
-
-DARTVM_LIB=$(find "$DARTVM_BUILD_DIR" -name "*.a" 2>/dev/null | head -1)
-echo "Dart VM static lib: $DARTVM_LIB"
+    echo "Dart VM static lib: $DARTVM_LIB (host)"
+fi
 
 # ═══════════════════════════════════════════════
-# Step 4: Build Capstone static lib for Android ARM64
+# Step 4: Build Capstone static lib
 # ═══════════════════════════════════════════════
 echo ""
 echo "─── [4/5] Building Capstone static lib ───"
 mkdir -p "$CAPSTONE_BUILD_DIR"
 cd "$CAPSTONE_BUILD_DIR"
-cmake -G Ninja \
-    -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DANDROID_ABI=arm64-v8a \
-    -DANDROID_PLATFORM=android-24 \
-    -DANDROID_STL=c++_static \
-    -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR" \
-    -DCAPSTONE_BUILD_SHARED=OFF \
-    -DCAPSTONE_BUILD_STATIC=ON \
-    -DCAPSTONE_ARCHITECTURES="aarch64" \
-    "$BLUTTER_DIR/third_party/capstone"
+
+CAPSTONE_CMAKE_ARGS=(
+    -G Ninja
+    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR"
+    -DCAPSTONE_BUILD_SHARED=OFF
+    -DCAPSTONE_BUILD_STATIC=ON
+    -DCAPSTONE_ARCHITECTURES="aarch64"
+)
+if [ "$USE_NDK" = true ]; then
+    CAPSTONE_CMAKE_ARGS+=(
+        -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE"
+        -DANDROID_ABI=arm64-v8a
+        -DANDROID_PLATFORM=android-24
+        -DANDROID_STL=c++_static
+    )
+fi
+
+cmake "${CAPSTONE_CMAKE_ARGS[@]}" "$BLUTTER_DIR/third_party/capstone"
 cmake --build . -j "$JOBS"
 CAPSTONE_LIB=$(find "$CAPSTONE_BUILD_DIR" -name "libcapstone.a" 2>/dev/null | head -1)
 if [ -z "$CAPSTONE_LIB" ]; then
@@ -223,40 +243,41 @@ if [ ! -d "$CAPSTONE_INCLUDE_DIR" ]; then
     CAPSTONE_INCLUDE_DIR=$(find "$CAPSTONE_BUILD_DIR" -name "capstone.h" -exec dirname {} \; 2>/dev/null | head -1)
 fi
 
-if [ -z "${DARTVM_LIB:-}" ]; then
-    DARTVM_LIB=$(find "$PACKAGES_DIR/lib" -name "*.a" 2>/dev/null | head -1)
+DARTVM_SO_CMAKE_ARGS=(
+    -G Ninja
+    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR"
+    -DDART_VERSION="$DART_VERSION"
+    -DBLUTTER_SRC_DIR="$BLUTTER_DIR/blutter/src"
+    -DDARTVM_PACKAGES="$PACKAGES_DIR"
+    -DDARTVM_LIB_NAME="$DARTVM_LIB_NAME"
+    -DDARTVM_STATIC_LIB="$DARTVM_LIB"
+    -DCAPSTONE_STATIC_LIB="$CAPSTONE_LIB"
+    -DCAPSTONE_INCLUDE_DIR="$CAPSTONE_INCLUDE_DIR"
+    -DSQLITE_DIR="$SQLITE_DIR"
+)
+if [ "$USE_NDK" = true ]; then
+    DARTVM_SO_CMAKE_ARGS+=(
+        -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE"
+        -DANDROID_ABI=arm64-v8a
+        -DANDROID_PLATFORM=android-24
+        -DANDROID_STL=c++_static
+    )
 fi
 
-cmake -G Ninja \
-    -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DANDROID_ABI=arm64-v8a \
-    -DANDROID_PLATFORM=android-24 \
-    -DANDROID_STL=c++_static \
-    -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR" \
-    -DDART_VERSION="$DART_VERSION" \
-    -DBLUTTER_SRC_DIR="$BLUTTER_DIR/blutter/src" \
-    -DDARTVM_PACKAGES="$PACKAGES_DIR" \
-    -DDARTVM_LIB_NAME="$DARTVM_LIB_NAME" \
-    -DDARTVM_STATIC_LIB="$DARTVM_LIB" \
-    -DCAPSTONE_STATIC_LIB="$CAPSTONE_LIB" \
-    -DCAPSTONE_INCLUDE_DIR="$CAPSTONE_INCLUDE_DIR" \
-    -DSQLITE_DIR="$SQLITE_DIR" \
-    $VERSION_DEFINES \
-    "$REPO_DIR/dartvm" 2>&1 || {
-    echo "ERROR: CMake configuration failed"
-    exit 1
-}
+cmake "${DARTVM_SO_CMAKE_ARGS[@]}" $VERSION_DEFINES "$REPO_DIR/dartvm"
 
 cmake --build . -j "$JOBS"
 
 # ─── Output ───
+OUTPUT_FILE="$OUTPUT_DIR/dartvm_${DART_VERSION}_${ARCH_TAG}.so"
 mkdir -p "$OUTPUT_DIR"
 cp "$DARTVM_SO_BUILD_DIR/libdartvm.so" "$OUTPUT_FILE"
+
 echo ""
 echo "════════════════════════════════════════════"
 echo " Build complete!"
 echo " Output: $OUTPUT_FILE"
 echo " Size:   $(ls -lh "$OUTPUT_FILE" | awk '{print $5}')"
+echo " Arch:   $(file "$OUTPUT_FILE")"
 echo "════════════════════════════════════════════"
-file "$OUTPUT_FILE"
