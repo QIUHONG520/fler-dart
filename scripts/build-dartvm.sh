@@ -147,7 +147,7 @@ new = ("    # fler-dart NDK injected\n"
        "    tc = '" + ndk_path + "/build/cmake/android.toolchain.cmake'\n"
        "    subprocess.run([CMAKE_CMD, '-GNinja', '-B', builddir,\n"
        "        f'-DCMAKE_TOOLCHAIN_FILE={tc}',\n"
-       "        f'-DANDROID_ABI=arm64-v8a', f'-DANDROID_PLATFORM=android-24',\n"
+       "        f'-DANDROID_ABI=arm64-v8a', f'-DANDROID_PLATFORM=android-31',\n"
        "        f'-DANDROID_STL=c++_static',")
 
 assert old in c, "Pattern not found in dartvm_fetch_build.py"
