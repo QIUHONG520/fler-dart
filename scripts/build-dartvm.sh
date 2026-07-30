@@ -136,8 +136,13 @@ if [ "$BUILD_SHARED_LIBS_ONLY" = "1" ]; then
 
     if [ ! -d "$ICU_SRC" ]; then
         echo "  Downloading ICU 73.2 source..."
-        curl -sL "https://github.com/unicode-org/icu/releases/download/icu4c-73_2-src.tgz" \
+        curl -fsSL "https://github.com/unicode-org/icu/releases/download/release-73-2/icu4c-73_2-src.tgz" \
             -o "$BUILD_ROOT/icu-src.tgz"
+        if ! file "$BUILD_ROOT/icu-src.tgz" | grep -q "gzip"; then
+            echo "ERROR: ICU download failed, not a gzip file"
+            echo "  First 100 bytes: $(head -c 100 "$BUILD_ROOT/icu-src.tgz")"
+            exit 1
+        fi
         mkdir -p "$ICU_SRC"
         tar xzf "$BUILD_ROOT/icu-src.tgz" -C "$ICU_SRC" --strip-components=1
         rm -f "$BUILD_ROOT/icu-src.tgz"
