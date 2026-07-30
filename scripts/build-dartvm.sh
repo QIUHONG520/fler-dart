@@ -83,7 +83,7 @@ echo "─── [1b] Patching Blutter for Dart SDK API compat ───"
 
 BLUTTER_DARTAPP="$BLUTTER_DIR/blutter/src/DartApp.cpp"
 if grep -q "closure\.entry_point()" "$BLUTTER_DARTAPP" 2>/dev/null; then
-    echo "Patching: closure.entry_point() → func.entry_point()"
+    echo "Patching DartApp.cpp: closure.entry_point() → func.entry_point()"
     python3 -c "
 import re
 with open('$BLUTTER_DARTAPP', 'r') as f:
@@ -95,8 +95,22 @@ c, n = re.subn(
     r'const auto& func = dart::Function::Handle(closure.function());\n\t\t\tconst auto ep_addr = func.entry_point() - base();',
     c
 )
-print(f'Patched {n} occurrences')
+print(f'  DartApp.cpp: {n} occurrences')
 with open('$BLUTTER_DARTAPP', 'w') as f:
+    f.write(c)
+"
+fi
+
+BLUTTER_DARTDUMPER="$BLUTTER_DIR/blutter/src/DartDumper.cpp"
+if grep -q "closure\.entry_point()" "$BLUTTER_DARTDUMPER" 2>/dev/null; then
+    echo "Patching DartDumper.cpp: closure.entry_point() → closure.function()->entry_point()"
+    python3 -c "
+with open('$BLUTTER_DARTDUMPER', 'r') as f:
+    c = f.read()
+c = c.replace('closure.entry_point()', 'closure.function()->entry_point()')
+n = c.count('closure.function()->entry_point()')
+print(f'  DartDumper.cpp: {n} occurrences')
+with open('$BLUTTER_DARTDUMPER', 'w') as f:
     f.write(c)
 "
 fi
