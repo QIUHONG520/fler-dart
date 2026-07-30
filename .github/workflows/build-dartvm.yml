@@ -57,7 +57,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/fler-dart-cache/dartvm_${{ matrix.dart-version }}/dart-sdk
-          key: dart-sdk-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v02
+          key: dart-sdk-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v03
 
       - name: Build dartvm.so
         run: |
