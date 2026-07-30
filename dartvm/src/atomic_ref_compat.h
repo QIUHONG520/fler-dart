@@ -4,11 +4,24 @@
 
 #if !defined(__cpp_lib_atomic_ref) || __cpp_lib_atomic_ref < 201806L
 
+#include <new>
+#include <type_traits>
+
 namespace std {
 
 template <typename T>
 class atomic_ref {
     T* ptr_;
+
+    // Load helper: read into aligned raw storage to avoid requiring
+    // default constructor (e.g. dart::CompressedTypePtr is not default-
+    // constructible but IS trivially copyable).
+    T load_raw(memory_order order = memory_order_seq_cst) const noexcept {
+        // Ensure aligned_storage doesn't zero-init
+        typename aligned_storage<sizeof(T), alignof(T)>::type storage;
+        __atomic_load(ptr_, reinterpret_cast<T*>(&storage), int(order));
+        return reinterpret_cast<const T&>(storage);
+    }
 
 public:
     using value_type = T;
@@ -21,19 +34,25 @@ public:
     atomic_ref& operator=(const atomic_ref&) = delete;
 
     T load(memory_order order = memory_order_seq_cst) const noexcept {
-        T tmp;
-        __atomic_load(ptr_, &tmp, int(order));
-        return tmp;
+        return load_raw(order);
     }
 
     void store(T desired, memory_order order = memory_order_seq_cst) noexcept {
         __atomic_store(ptr_, &desired, int(order));
     }
 
+    operator T() const noexcept { return load_raw(); }
+
+    T operator=(T desired) noexcept {
+        store(desired);
+        return desired;
+    }
+
     T exchange(T desired, memory_order order = memory_order_seq_cst) noexcept {
-        T tmp;
-        __atomic_exchange(ptr_, &desired, &tmp, int(order));
-        return tmp;
+        typename aligned_storage<sizeof(T), alignof(T)>::type storage;
+        __atomic_exchange(ptr_, &desired,
+                          reinterpret_cast<T*>(&storage), int(order));
+        return reinterpret_cast<const T&>(storage);
     }
 
     bool compare_exchange_weak(T& expected, T desired,
@@ -49,13 +68,6 @@ public:
         return __atomic_compare_exchange(ptr_, &expected, &desired,
                                          false, int(success), int(failure));
     }
-
-    T operator=(T desired) noexcept {
-        store(desired);
-        return desired;
-    }
-
-    operator T() const noexcept { return load(); }
 
     bool is_lock_free() const noexcept {
         return __atomic_is_lock_free(sizeof(T), ptr_);
