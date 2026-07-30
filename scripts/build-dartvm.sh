@@ -173,6 +173,11 @@ c = c.replace(
 )
 
 c = c.replace(
+    "target_compile_options(${LIBNAME} PRIVATE ${cc_opts})",
+    "target_compile_options(${LIBNAME} PRIVATE ${cc_opts})\nif(ANDROID)\n    target_compile_options(${LIBNAME} PRIVATE -include \"${PROJECT_SOURCE_DIR}/atomic_ref_compat.h\")\nendif()"
+)
+
+c = c.replace(
     "if (MSVC)\n\ttarget_link_libraries(${LIBNAME} PUBLIC ${ICU_LIBRARIES})\nelse()\n\ttarget_link_libraries(${LIBNAME} PUBLIC dl pthread ${ICU_LIBRARIES})\nendif()",
     "if(ANDROID)\n\ttarget_link_libraries(${LIBNAME} PUBLIC atomic log ${ICU_LIBRARIES})\nelseif(MSVC)\n\ttarget_link_libraries(${LIBNAME} PUBLIC ${ICU_LIBRARIES})\nelse()\n\ttarget_link_libraries(${LIBNAME} PUBLIC dl pthread ${ICU_LIBRARIES})\nendif()"
 )
@@ -196,6 +201,9 @@ echo "Exporting NDK for dartvm_fetch_build.py..."
 export ANDROID_NDK_HOME="$NDK_PATH"
 export ANDROID_NDK_ROOT="$NDK_PATH"
 export FLER_NDK="$NDK_PATH"
+
+# Copy atomic_ref_compat.h to SDK source dir (referenced by CMake template)
+cp "$REPO_DIR/dartvm/src/atomic_ref_compat.h" "$BLUTTER_DIR/dartsdk/v$DART_VERSION/"
 
 # Determine snapshot hash from installed packages for cache key
 SNAPSHOT_HASH=""
