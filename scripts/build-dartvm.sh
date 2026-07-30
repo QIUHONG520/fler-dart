@@ -185,7 +185,7 @@ c = c.replace(
 # 3. Exclude regexp/ dir (missing ICU headers on NDK; not needed for DART_PRECOMPILED_RUNTIME)
 c = c.replace(
     "include(sourcelist.cmake)\nadd_library",
-    "include(sourcelist.cmake)\nif(ANDROID)\n    list(FILTER SRCS EXCLUDE REGEX \"/regexp/\")\nendif()\nadd_library"
+    "include(sourcelist.cmake)\nif(ANDROID)\n    list(FILTER SRCS EXCLUDE REGEX "regexp")\nendif()\nadd_library"
 )
 
 print("  CMake template: patched OK")
@@ -356,7 +356,7 @@ cmake -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
     -DCMAKE_BUILD_TYPE=Release \
     -DANDROID_ABI=arm64-v8a \
-    -DANDROID_PLATFORM=android-24 \
+    -DANDROID_PLATFORM=android-31 \
     -DANDROID_STL=c++_static \
     -DDART_VERSION="$DART_VERSION" \
     -DBLUTTER_SRC_DIR="$BLUTTER_DIR/blutter/src" \
