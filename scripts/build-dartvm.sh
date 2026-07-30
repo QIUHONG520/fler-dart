@@ -9,12 +9,13 @@
 #
 # Pipeline:
 #   1. Clone Blutter repo
-#   2. Checkout Dart SDK source for target version
-#   3. Cross-compile Dart VM static lib for Android ARM64 (via NDK)
-#      Falls back to host build if NDK fails (e.g. ICU not available for cross-compile)
-#   4. Cross-compile Capstone static lib (same arch as dartvm)
+#   2. Checkout Dart SDK source; dartvm_fetch_build.py builds ARM64 static lib
+#      (NDK env vars exported for cross-compilation)
+#   3. Verify ARM64 Dart VM static lib from packages/lib/
+#      Falls back to GN-based cross-compile if not found or wrong arch
+#   4. Cross-compile Capstone static lib for ARM64 (via NDK CMake)
 #   5. Compile dartvm.so (Blutter C++ + blutter_entry.cpp + SQLite)
-#   6. Strip → output/dartvm_<version>_<arch>.so
+#   6. Strip → output/dartvm_<version>_android_arm64.so
 
 set -euo pipefail
 
@@ -119,6 +120,13 @@ echo ""
 echo "─── [2/5] Checking out Dart SDK v${DART_VERSION} ───"
 cd "$BLUTTER_DIR"
 pip install -q -r requirements.txt 2>/dev/null || true
+
+echo "Exporting NDK for cross-compilation..."
+export ANDROID_NDK_HOME="$NDK_PATH"
+export ANDROID_NDK_ROOT="$NDK_PATH"
+export NDK="$NDK_PATH"
+echo "  ANDROID_NDK_HOME=$NDK_PATH"
+
 python3 dartvm_fetch_build.py "$DART_VERSION" android arm64
 SDK_DIR="$BLUTTER_DIR/dartsdk/v${DART_VERSION}"
 echo "Dart SDK: $SDK_DIR"
@@ -162,38 +170,122 @@ if [ ! -f "$SQLITE_DIR/sqlite3.c" ]; then
 fi
 
 # ═══════════════════════════════════════════════
-# Step 3: Build Dart VM static lib
+# Step 3: Verify Dart VM ARM64 static lib
 # ═══════════════════════════════════════════════
 echo ""
-echo "─── [3/5] Building Dart VM static lib ───"
-mkdir -p "$DARTVM_BUILD_DIR"
-cd "$DARTVM_BUILD_DIR"
+echo "─── [3/5] Verifying Dart VM static lib for ARM64 ───"
 
-echo "Trying NDK cross-compile for Android ARM64..."
-if cmake -G Ninja \
-    -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DANDROID_ABI=arm64-v8a \
-    -DANDROID_PLATFORM=android-24 \
-    -DANDROID_STL=c++_static \
-    -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR" \
-    "$SDK_DIR" > /dev/null 2>&1 && \
-    cmake --build . -j "$JOBS" > /dev/null 2>&1; then
-    DARTVM_LIB=$(find "$DARTVM_BUILD_DIR" -name "*.a" 2>/dev/null | head -1)
-    echo "Dart VM static lib: $DARTVM_LIB (Android ARM64)"
-else
-    echo "WARNING: NDK cross-compile failed (likely ICU). Building for host instead."
-    USE_NDK=false
-    ARCH_TAG="linux_x86_64"
-    # CMake package name stays as-is (matching packages/), just link with host toolchain
-    # Use the host-built dartvm from Blutter's packages/
-    DARTVM_LIB=$(find "$PACKAGES_DIR/lib" -name "*.a" 2>/dev/null | head -1)
-    if [ -z "$DARTVM_LIB" ]; then
-        echo "ERROR: No host dartvm static lib found in packages/"
-        exit 1
+# Primary: check packages/lib/ for ARM64 .a from dartvm_fetch_build.py
+AARCH64_LIB=$(find "$PACKAGES_DIR/lib" -maxdepth 1 -name "*android_arm64*" \( -name "*.a" -o -name "*.so" \) 2>/dev/null | head -1)
+
+if [ -n "$AARCH64_LIB" ]; then
+    USE_NDK=true
+    ARCH_TAG="android_arm64"
+    DARTVM_LIB="$AARCH64_LIB"
+    echo "Found ARM64 Dart VM lib from packages/: $DARTVM_LIB"
+
+    # Verify it's actually ARM64
+    if command -v file > /dev/null; then
+        FILE_OUT=$(file "$DARTVM_LIB" 2>/dev/null || true)
+        if echo "$FILE_OUT" | grep -qi "ARM\|aarch64"; then
+            echo "  Architecture: ARM64 (verified)"
+        elif echo "$FILE_OUT" | grep -qi "x86\|x86-64\|ELF 64-bit"; then
+            echo "  WARNING: ${DARTVM_LIB} is x86_64, not ARM64. dartvm_fetch_build.py miscompiled."
+            echo "  Attempting fallback GN build..."
+            AARCH64_LIB=""
+        fi
     fi
-    echo "Dart VM static lib: $DARTVM_LIB (host)"
 fi
+
+# Fallback: try GN-based cross-compile from Dart SDK source
+if [ -z "$AARCH64_LIB" ]; then
+    echo "ARM64 Dart VM lib not found in packages/. Trying Dart SDK GN build..."
+    if [ -d "$SDK_DIR" ] && [ -d "$SDK_DIR/runtime" ]; then
+        cd "$SDK_DIR"
+
+        # Check if GN args file already exists (from dartvm_fetch_build.py)
+        GN_OUT_DIR=$(find "out" -maxdepth 2 -type f -name "args.gn" 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)
+        if [ -z "$GN_OUT_DIR" ]; then
+            # Create our own GN args for Android ARM64
+            GN_OUT_DIR="out/android_arm64_release"
+            mkdir -p "$GN_OUT_DIR"
+            cat > "$GN_OUT_DIR/args.gn" << 'GNARGS'
+target_os = "android"
+target_cpu = "arm64"
+is_debug = false
+dart_runtime_mode = "release"
+GNARGS
+            echo "Created GN args at $GN_OUT_DIR/args.gn"
+        else
+            echo "Using existing GN out dir: $GN_OUT_DIR"
+
+            # Override key args to ensure ARM64 target
+            cat >> "$GN_OUT_DIR/args.gn" << 'GNARGS2'
+target_os = "android"
+target_cpu = "arm64"
+is_debug = false
+dart_runtime_mode = "release"
+GNARGS2
+        fi
+
+        # Try GN + Ninja build
+        if command -v gn > /dev/null 2>&1 && command -v ninja > /dev/null 2>&1; then
+            echo "Running: gn gen $GN_OUT_DIR"
+            gn gen "$GN_OUT_DIR" 2>&1 || {
+                echo "WARNING: gn gen failed, trying tools/build.py fallback..."
+                GN_OUT_DIR=""
+            }
+
+            if [ -n "$GN_OUT_DIR" ]; then
+                echo "Running: ninja -C $GN_OUT_DIR libdart_lib_withcore"
+                ninja -C "$GN_OUT_DIR" -j "$JOBS" libdart_lib_withcore 2>&1 || true
+
+                DARTVM_LIB=$(find "$GN_OUT_DIR" -name "libdart_lib_withcore*" \( -name "*.a" -o -name "*.so" \) 2>/dev/null | head -1)
+                if [ -n "$DARTVM_LIB" ]; then
+                    echo "GN build succeeded: $DARTVM_LIB"
+                    USE_NDK=true
+                    ARCH_TAG="android_arm64"
+                fi
+            fi
+        fi
+
+        # Last resort: try Dart SDK's tools/build.py
+        if [ -z "$DARTVM_LIB" ] && [ -f "$SDK_DIR/tools/build.py" ]; then
+            echo "Trying: python3 tools/build.py --mode=release --arch=arm64 --os=android runtime"
+            cd "$SDK_DIR"
+            python3 tools/build.py --mode=release --arch=arm64 --os=android runtime 2>&1 || true
+
+            DARTVM_LIB=$(find "out" -name "*.a" -path "*Release*" -o -name "*.a" -path "*arm64*" 2>/dev/null | head -1)
+            if [ -n "$DARTVM_LIB" ]; then
+                echo "tools/build.py succeeded: $DARTVM_LIB"
+                USE_NDK=true
+                ARCH_TAG="android_arm64"
+            fi
+        fi
+    fi
+fi
+
+# Fail if we still have no ARM64 lib
+if [ -z "$DARTVM_LIB" ]; then
+    echo ""
+    echo "════════════════════════════════════════════"
+    echo " ERROR: Cannot produce ARM64 Dart VM static lib."
+    echo ""
+    echo " Tried:"
+    echo "  1. packages/lib/*android_arm64* from dartvm_fetch_build.py"
+    echo "  2. GN + Ninja cross-compile from Dart SDK source"
+    echo "  3. tools/build.py cross-compile from Dart SDK source"
+    echo ""
+    echo " Suggestions:"
+    echo "  - Ensure NDK r27+ is properly installed"
+    echo "  - Ensure depot_tools (gn, ninja) are available in PATH"
+    echo "  - Check Blutter's dartvm_fetch_build.py supports Dart v${DART_VERSION}"
+    echo "════════════════════════════════════════════"
+    exit 1
+fi
+
+echo "Dart VM static lib: $DARTVM_LIB"
+echo "Target arch:       $ARCH_TAG"
 
 # ═══════════════════════════════════════════════
 # Step 4: Build Capstone static lib
@@ -273,6 +365,10 @@ DARTVM_INCLUDE_DIR="$PACKAGES_DIR/include/$DARTVM_LIB_NAME"
 if [ ! -d "$DARTVM_INCLUDE_DIR" ]; then
     DARTVM_INCLUDE_DIR=$(find "$PACKAGES_DIR/include" -maxdepth 1 -type d -name "dartvm*" 2>/dev/null | head -1)
 fi
+# GN fallback: headers are in the Dart SDK source
+if [ ! -d "${DARTVM_INCLUDE_DIR:-}" ] && [ -d "$SDK_DIR/runtime" ]; then
+    DARTVM_INCLUDE_DIR="$SDK_DIR/runtime"
+fi
 
 if [ ! -d "${CAPSTONE_INCLUDE_DIR:-}" ]; then
     CAPSTONE_INCLUDE_DIR="$BLUTTER_DIR/third_party/capstone/include"
@@ -302,6 +398,9 @@ DARTVM_SO_CMAKE_ARGS=(
     -DCAPSTONE_INCLUDE_DIR="$CAPSTONE_INCLUDE_DIR"
     -DSQLITE_DIR="$SQLITE_DIR"
 )
+if [ -n "${DARTVM_INCLUDE_DIR:-}" ]; then
+    DARTVM_SO_CMAKE_ARGS+=(-DDARTVM_INCLUDE_DIR="$DARTVM_INCLUDE_DIR")
+fi
 if [ "$USE_NDK" = true ]; then
     DARTVM_SO_CMAKE_ARGS+=(
         -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE"

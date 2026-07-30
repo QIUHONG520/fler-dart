@@ -44,6 +44,11 @@ jobs:
             cmake ninja-build python3 python3-pip \
             curl git file lld libicu-dev libcapstone-dev pkg-config
 
+      - name: Setup depot_tools (gn for fallback Dart VM build)
+        run: |
+          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git /tmp/depot_tools
+          echo "/tmp/depot_tools" >> $GITHUB_PATH
+
       - name: Setup Android NDK ${{ env.NDK_VERSION }}
         uses: nttld/setup-ndk@v1
         with:

@@ -19,15 +19,30 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# ─── Find Dart VM package ───
+# ─── Detect Dart VM lib (before add_library) ───
 if(NOT DARTVM_PACKAGES)
     set(DARTVM_PACKAGES "${BLUTTER_SRC_DIR}/../packages")
 endif()
 if(NOT DARTVM_LIB_NAME)
     message(FATAL_ERROR "DARTVM_LIB_NAME required")
 endif()
-find_package(${DARTVM_LIB_NAME} REQUIRED PATHS "${DARTVM_PACKAGES}")
-message(STATUS "Found Dart VM: ${DARTVM_LIB_NAME}")
+
+# DARTVM_STATIC_LIB is set by build-dartvm.sh to the .a path.
+# It may come from packages/ (dartvm_fetch_build.py) or from GN build.
+if(DARTVM_STATIC_LIB)
+    get_filename_component(_dartvm_lib_ext "${DARTVM_STATIC_LIB}" LAST_EXT)
+    if("${_dartvm_lib_ext}" MATCHES "^\\.(a|so)$")
+        message(STATUS "Dart VM lib (direct): ${DARTVM_STATIC_LIB}")
+        set(_DARTVM_USE_DIRECT ON)
+        set(_DARTVM_LIB_TO_LINK "${DARTVM_STATIC_LIB}")
+    endif()
+endif()
+
+if(NOT _DARTVM_USE_DIRECT)
+    find_package(${DARTVM_LIB_NAME} REQUIRED PATHS "${DARTVM_PACKAGES}")
+    message(STATUS "Found Dart VM (package): ${DARTVM_LIB_NAME}")
+    set(_DARTVM_LIB_TO_LINK ${DARTVM_LIB_NAME})
+endif()
 
 # ─── Find Capstone ───
 if(NOT CAPSTONE_STATIC_LIB)
@@ -87,11 +102,21 @@ target_include_directories(dartvm PRIVATE
     ${BLUTTER_SRC_DIR}
 )
 
-get_target_property(_dartvm_inc ${DARTVM_LIB_NAME} INTERFACE_INCLUDE_DIRECTORIES)
-if(NOT _dartvm_inc)
-    target_include_directories(dartvm PRIVATE
-        "${DARTVM_PACKAGES}/include/${DARTVM_LIB_NAME}"
-    )
+if(_DARTVM_USE_DIRECT)
+    if(DARTVM_INCLUDE_DIR)
+        target_include_directories(dartvm PRIVATE ${DARTVM_INCLUDE_DIR})
+    elseif(EXISTS "${DARTVM_PACKAGES}/include/${DARTVM_LIB_NAME}")
+        target_include_directories(dartvm PRIVATE "${DARTVM_PACKAGES}/include/${DARTVM_LIB_NAME}")
+    else()
+        target_include_directories(dartvm PRIVATE "${DARTVM_PACKAGES}/include")
+    endif()
+else()
+    get_target_property(_dartvm_inc ${DARTVM_LIB_NAME} INTERFACE_INCLUDE_DIRECTORIES)
+    if(NOT _dartvm_inc)
+        target_include_directories(dartvm PRIVATE
+            "${DARTVM_PACKAGES}/include/${DARTVM_LIB_NAME}"
+        )
+    endif()
 endif()
 
 target_include_directories(dartvm PRIVATE
@@ -102,7 +127,7 @@ target_include_directories(dartvm PRIVATE
 
 # ─── Link libraries ───
 target_link_libraries(dartvm PRIVATE
-    ${DARTVM_LIB_NAME}
+    ${_DARTVM_LIB_TO_LINK}
     ${CAPSTONE_STATIC_LIB}
 )
 
