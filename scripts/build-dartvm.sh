@@ -158,10 +158,9 @@ with open(fetch_file, 'w') as f:
 PYEOF
 fi
 
-# 2. Patch CMake template: make ICU optional + Android link flags + atomic_ref
-if ! grep -q "fler-dart-patched-v2" "$BLUTTER_TEMPLATE" 2>/dev/null; then
-    echo "Patching CMake template..."
-    python3 - "$BLUTTER_TEMPLATE" "$BLUTTER_DIR" << 'PYEOF'
+# 2. Patch CMake template (idempotent — always safe to re-apply)
+echo "Patching CMake template..."
+python3 - "$BLUTTER_TEMPLATE" "$BLUTTER_DIR" << 'PYEOF'
 import sys
 tmpl = sys.argv[1]
 blutter_dir = sys.argv[2]
@@ -193,7 +192,6 @@ print("  CMake template: patched OK")
 with open(tmpl, 'w') as f:
     f.write(c)
 PYEOF
-fi
 
 # Copy atomic_ref_compat.h to blutter dir (CMake template references it there)
 cp "$REPO_DIR/dartvm/src/atomic_ref_compat.h" "$BLUTTER_DIR/" 2>/dev/null || true
