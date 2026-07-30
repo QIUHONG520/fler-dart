@@ -158,12 +158,13 @@ with open(fetch_file, 'w') as f:
 PYEOF
 fi
 
-# 2. Patch CMake template: make ICU optional + Android link flags
+# 2. Patch CMake template: make ICU optional + Android link flags + atomic_ref
 if ! grep -q "fler-dart: ICU optional" "$BLUTTER_TEMPLATE" 2>/dev/null; then
     echo "Patching CMake template..."
-    python3 - "$BLUTTER_TEMPLATE" << 'PYEOF'
+    python3 - "$BLUTTER_TEMPLATE" "$BLUTTER_DIR" << 'PYEOF'
 import sys
 tmpl = sys.argv[1]
+blutter_dir = sys.argv[2]
 with open(tmpl, 'r') as f:
     c = f.read()
 
@@ -171,6 +172,25 @@ c = c.replace(
     "find_package(ICU REQUIRED uc)",
     "# fler-dart: ICU optional\nif(ANDROID)\n    find_package(ICU QUIET)\n    set(ICU_LIBRARIES \"\")\nelse()\n    find_package(ICU REQUIRED uc)\nendif()"
 )
+
+c = c.replace(
+    "target_compile_options(${LIBNAME} PRIVATE ${cc_opts})",
+    "target_compile_options(${LIBNAME} PRIVATE ${cc_opts})\nif(ANDROID)\n    target_compile_options(${LIBNAME} PRIVATE -include \"" + blutter_dir + "/atomic_ref_compat.h\")\nendif()"
+)
+
+c = c.replace(
+    "if (MSVC)\n\ttarget_link_libraries(${LIBNAME} PUBLIC ${ICU_LIBRARIES})\nelse()\n\ttarget_link_libraries(${LIBNAME} PUBLIC dl pthread ${ICU_LIBRARIES})\nendif()",
+    "if(ANDROID)\n\ttarget_link_libraries(${LIBNAME} PUBLIC atomic log ${ICU_LIBRARIES})\nelseif(MSVC)\n\ttarget_link_libraries(${LIBNAME} PUBLIC ${ICU_LIBRARIES})\nelse()\n\ttarget_link_libraries(${LIBNAME} PUBLIC dl pthread ${ICU_LIBRARIES})\nendif()"
+)
+
+print("  CMake template: patched OK")
+with open(tmpl, 'w') as f:
+    f.write(c)
+PYEOF
+fi
+
+# Copy atomic_ref_compat.h to blutter dir (CMake template references it there)
+cp "$REPO_DIR/dartvm/src/atomic_ref_compat.h" "$BLUTTER_DIR/" 2>/dev/null || true
 
 c = c.replace(
     "target_compile_options(${LIBNAME} PRIVATE ${cc_opts})",
@@ -201,9 +221,6 @@ echo "Exporting NDK for dartvm_fetch_build.py..."
 export ANDROID_NDK_HOME="$NDK_PATH"
 export ANDROID_NDK_ROOT="$NDK_PATH"
 export FLER_NDK="$NDK_PATH"
-
-# Copy atomic_ref_compat.h to SDK source dir (referenced by CMake template)
-cp "$REPO_DIR/dartvm/src/atomic_ref_compat.h" "$BLUTTER_DIR/dartsdk/v$DART_VERSION/"
 
 # Determine snapshot hash from installed packages for cache key
 SNAPSHOT_HASH=""
