@@ -1,4 +1,4 @@
-name: Build dartvm.so
+name: Build dartvm (v3 — Dynamic Linking)
 
 on:
   push:
@@ -19,10 +19,63 @@ on:
 
 env:
   NDK_VERSION: ${{ inputs.ndk-version || 'r27' }}
+  DART_VERSIONS: '3.12.2 3.12.1 3.12.0 3.11.5 3.11.4 3.10.7 3.10.6 3.9.2 3.9.1 3.8.1 3.8.0'
 
 jobs:
-  build:
-    name: dartvm ${{ matrix.dart-version }}
+  # ══════════════════════════════════════════════════════════
+  # STAGE 1: Build shared libraries (once, reused across versions)
+  # ══════════════════════════════════════════════════════════
+  shared-libs:
+    name: Build Shared Libraries (capstone + ICU + c++_shared)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fler-dart
+        uses: actions/checkout@v4
+        with:
+          path: fler-dart
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build python3 python3-pip \
+            curl git file p7zip-full
+
+      - name: Setup Android NDK ${{ env.NDK_VERSION }}
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+
+      - name: Build shared libraries
+        run: |
+          bash fler-dart/scripts/build-dartvm.sh \
+            --build-shared-libs-only \
+            --ndk-path $ANDROID_NDK_HOME \
+            --output-dir "$(pwd)/output" \
+            --build-root "/tmp/fler-dart-cache/shared_libs"
+
+      - name: Verify shared libs
+        run: |
+          echo "=== Shared libraries ==="
+          ls -lh output/shared_libs/
+          echo ""
+          for f in output/shared_libs/*.so; do
+            [ -f "$f" ] && file "$f"
+          done
+
+      - name: Upload shared libs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared_libs
+          path: output/shared_libs/*.so
+          retention-days: 30
+
+  # ══════════════════════════════════════════════════════════
+  # STAGE 2: Build version-specific engines (matrix, parallel)
+  # ══════════════════════════════════════════════════════════
+  build-engines:
+    name: Build Engine ${{ matrix.dart-version }}
+    needs: shared-libs
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -30,10 +83,16 @@ jobs:
         dart-version:
           - '3.12.2'
           - '3.12.1'
+          - '3.12.0'
           - '3.11.5'
+          - '3.11.4'
           - '3.10.7'
+          - '3.10.6'
           - '3.9.2'
+          - '3.9.1'
           - '3.8.1'
+          - '3.8.0'
+
     steps:
       - name: Checkout fler-dart
         uses: actions/checkout@v4
@@ -52,6 +111,12 @@ jobs:
         with:
           ndk-version: ${{ env.NDK_VERSION }}
 
+      - name: Download shared libs
+        uses: actions/download-artifact@v4
+        with:
+          name: shared_libs
+          path: output/shared_libs
+
       - name: Cache Blutter + build artifacts
         id: cache-dartvm
         uses: actions/cache@v4
@@ -61,75 +126,182 @@ jobs:
             /tmp/fler-dart-cache/dartvm_${{ matrix.dart-version }}/blutter/packages
           key: dartvm-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v11
 
-      - name: Build dartvm.so
+      - name: Build dartvm.so (dynamic linking)
         run: |
           mkdir -p output
           bash fler-dart/scripts/build-dartvm.sh \
             --dart-version ${{ matrix.dart-version }} \
             --ndk-path $ANDROID_NDK_HOME \
             --output-dir "$(pwd)/output" \
-            --build-root "/tmp/fler-dart-cache/dartvm_${{ matrix.dart-version }}"
+            --build-root "/tmp/fler-dart-cache/dartvm_${{ matrix.dart-version }}" \
+            --prebuilt-shared-libs-dir "$(pwd)/output/shared_libs"
 
       - name: Verify output
         run: |
+          echo "=== Engine .so files for ${{ matrix.dart-version }} ==="
           ls -lh output/
+          echo ""
           for f in output/dartvm_*.so; do
             [ -f "$f" ] && file "$f"
           done
 
-      - name: Upload artifact
+      - name: Upload engine artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dartvm_${{ matrix.dart-version }}
+          name: engine_${{ matrix.dart-version }}
           path: output/dartvm_${{ matrix.dart-version }}_*.so
+          retention-days: 30
 
+  # ══════════════════════════════════════════════════════════
+  # STAGE 3: Package all engines + shared libs into 7z
+  # ══════════════════════════════════════════════════════════
+  package-release:
+    name: Package 7z Release
+    needs: [shared-libs, build-engines]
+    if: always() && (needs.shared-libs.result == 'success' && needs.build-engines.result == 'success')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download shared libs
+        uses: actions/download-artifact@v4
+        with:
+          name: shared_libs
+          path: staging/shared_libs
+
+      - name: Download all engine artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: staging/engines
+
+      - name: Assemble release package
+        run: |
+          mkdir -p release/fler-engines
+          mkdir -p release/fler-engines/lib
+
+          # Copy shared libraries
+          echo "=== Shared libraries ==="
+          cp staging/shared_libs/*.so release/fler-engines/lib/
+          ls -lh release/fler-engines/lib/
+
+          # Copy all version engines
+          echo ""
+          echo "=== DartVM engines ==="
+          for dir in staging/engines/engine_*/; do
+            [ -d "$dir" ] || continue
+            for so in "$dir"*.so; do
+              [ -f "$so" ] || continue
+              ver=$(echo "$so" | grep -oP 'dartvm_\K[0-9.]+')
+              cp "$so" "release/fler-engines/dartvm_${ver}.so"
+              echo "  Added: dartvm_${ver}.so ($(ls -lh "$so" | awk '{print $5}'))"
+            done
+          done
+
+          echo ""
+          echo "=== Final package contents ==="
+          find release/fler-engines -type f | sort
+          echo ""
+          echo "Total size:"
+          du -sh release/fler-engines
+
+      - name: Create 7z archive
+        run: |
+          cd release
+          7z a -mx=9 -m0=lzma2 fler-engines.7z fler-engines/
+          echo ""
+          echo "=== 7z archive ==="
+          ls -lh fler-engines.7z
+          7z l fler-engines.7z
+          cd ..
+
+      - name: Generate checksums
+        run: |
+          cd release
+          sha256sum fler-engines.7z > checksums.txt
+          cat checksums.txt
+          cd ..
+
+      - name: Upload 7z package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fler-engines-7z
+          path: |
+            release/fler-engines.7z
+            release/checksums.txt
+          retention-days: 90
+
+  # ══════════════════════════════════════════════════════════
+  # STAGE 4: Create GitHub Release (tag pushes only)
+  # ══════════════════════════════════════════════════════════
   release:
     name: Create Release
-    needs: build
+    needs: [shared-libs, build-engines, package-release]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: Download all artifacts
+      - name: Download 7z package
         uses: actions/download-artifact@v4
+        with:
+          name: fler-engines-7z
+          path: release-assets
 
-      - name: Prepare release assets
-        run: |
-          mkdir -p release-assets
-          for dir in dartvm_*/; do
-            [ -d "$dir" ] || continue
-            cp "$dir"/*.so release-assets/
-          done
-          ls -lh release-assets/
-
-      - name: Generate checksums
+      - name: Generate release summary
         run: |
           cd release-assets
-          sha256sum *.so > checksums.txt
-          cat checksums.txt
+          echo "Release assets:"
+          ls -lh
+          echo ""
+          echo "7z contents:"
+          7z l fler-engines.7z 2>/dev/null || echo "(7z not available, listing checksum)"
+          cat checksums.txt 2>/dev/null || echo ""
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: dartvm ${{ github.ref_name }}
+          name: fler-engines ${{ github.ref_name }}
           body: |
-            ## dartvm.so Release ${{ github.ref_name }}
+            ## fler-engines ${{ github.ref_name }} — Unified Engine Package
 
-            Prebuilt dartvm.so for Android ARM64 (arm64-v8a).
+            Single 7z archive containing all Dart VM engines and shared libraries.
 
-              | File | Size |
-              |------|------|
-            $(for f in release-assets/dartvm_*.so; do
-              name=$(basename "$f")
-              size=$(ls -lh "$f" | awk '{print $5}')
-              echo "| \`$name\` | $size |"
-            done)
+            ### Package Contents
+
+            | Category | Files |
+            |----------|-------|
+            | **Engines** | `dartvm_3.12.2.so`, `dartvm_3.12.1.so`, `dartvm_3.12.0.so`, `dartvm_3.11.5.so`, `dartvm_3.11.4.so`, `dartvm_3.10.7.so`, `dartvm_3.10.6.so`, `dartvm_3.9.2.so`, `dartvm_3.9.1.so`, `dartvm_3.8.1.so`, `dartvm_3.8.0.so` |
+            | **Shared Libs** | `libcapstone.so`, `libicuuc.so`, `libicudata.so`, `libc++_shared.so` |
+
+            ### Architecture
+            - **ABI**: arm64-v8a (Android ARM64)
+            - **Dynamic Linking**: Capstone/ICU/c++_shared linked dynamically, shared across all versions
+            - **rpath**: `$ORIGIN` for runtime shared lib resolution
 
             ### Usage
 
-            Place `.so` in `Fler/cache/dartvm/` on device.
+            1. Download `fler-engines.7z` (~7-10MB)
+            2. Extract to `Fler/cache/engines/`
+            3. Folder structure:
+               ```
+               Fler/cache/engines/
+               ├── lib/
+               │   ├── libcapstone.so
+               │   ├── libicuuc.so
+               │   ├── libicudata.so
+               │   └── libc++_shared.so
+               ├── dartvm_3.12.2.so
+               ├── dartvm_3.12.1.so
+               ├── dartvm_3.12.0.so
+               ├── dartvm_3.11.5.so
+               ├── dartvm_3.11.4.so
+               ├── dartvm_3.10.7.so
+               ├── dartvm_3.10.6.so
+               ├── dartvm_3.9.2.so
+               ├── dartvm_3.9.1.so
+               ├── dartvm_3.8.1.so
+               └── dartvm_3.8.0.so
+               ```
           files: |
-            release-assets/*.so
+            release-assets/fler-engines.7z
             release-assets/checksums.txt
