@@ -163,22 +163,33 @@ if [ ! -f "$DART_BUILD_DIR/build.ninja" ]; then
 fi
 
 echo "Building libdart (finding correct target)..."
-# Try known target names; GN outputs vary by configuration
-ninja -C "$DART_BUILD_DIR" -j "$JOBS" -t targets all 2>/dev/null | grep -i "libdart" | head -5 || true
-DART_TARGET=$(ninja -C "$DART_BUILD_DIR" -j "$JOBS" -t targets all 2>/dev/null | grep -E "^(runtime/|//runtime:)?libdart[^:]*:" | head -1 | cut -d: -f1)
+# List available static library targets
+NINJA_TARGETS=$(ninja -C "$DART_BUILD_DIR" -j "$JOBS" -t targets all 2>/dev/null)
+
+# Find the main static lib target (not the shared lib which has macOS -install_name)
+DART_TARGET=$(echo "$NINJA_TARGETS" | grep -E "obj/runtime/libdart\.a:" | head -1 | cut -d: -f1)
+
 if [ -z "$DART_TARGET" ]; then
-    # Fallback: build 'dart' executable which depends on the library
-    echo "No libdart target found, building 'dart'..."
-    ninja -C "$DART_BUILD_DIR" -j "$JOBS" dart
+    # Try to find any static libdart target
+    DART_TARGET=$(echo "$NINJA_TARGETS" | grep -E "runtime.*libdart.*\.a:" | grep -v "dart_jit\|dart_precompiled" | head -1 | cut -d: -f1)
+fi
+
+if [ -z "$DART_TARGET" ]; then
+    # Build sub-targets: vm, lib, platform
+    echo "Building sub-targets: vm/libdart_vm, vm/libdart_lib, platform/libdart_platform"
+    ninja -C "$DART_BUILD_DIR" -j "$JOBS" \
+        "vm:libdart_vm" \
+        "vm:libdart_lib" \
+        "platform:libdart_platform" \
+        "../third_party/double-conversion/src:libdouble_conversion"
 else
     echo "Using target: $DART_TARGET"
     ninja -C "$DART_BUILD_DIR" -j "$JOBS" "$DART_TARGET"
 fi
 
-# Find the static library
-DARTVM_LIB=$(find "$DART_BUILD_DIR" -name "libdart*.a" 2>/dev/null | head -1)
+# Find the static library (may be in obj/ subdirs)
+DARTVM_LIB=$(find "$DART_BUILD_DIR" -name "libdart_vm*.a" -o -name "libdart.a" 2>/dev/null | head -1)
 if [ -z "$DARTVM_LIB" ]; then
-    # Try alternate locations
     DARTVM_LIB=$(find "$DART_BUILD_DIR/obj" -name "libdart*.a" 2>/dev/null | head -1)
 fi
 if [ -z "$DARTVM_LIB" ]; then
