@@ -24,16 +24,16 @@ class String;
 }
 
 // Minimal RuntimeEntry matching Dart SDK's vm/runtime_entry.h layout.
-// Only the name + function pointer members matter for mangling.
+// Uses function pointer for storage (C++ forbids plain function-type members).
 namespace dart {
 template <typename Signature>
 class RuntimeEntry {
  public:
-  constexpr RuntimeEntry(const char* name, Signature function)
+  constexpr RuntimeEntry(const char* name, Signature* function)
       : name_(name), function_(function) {}
  private:
   const char* name_;
-  Signature function_;
+  Signature* function_;
 };
 }
 
