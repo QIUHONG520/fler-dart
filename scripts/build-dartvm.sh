@@ -216,18 +216,30 @@ DARMVM_LIB_NAME="dartvm${DART_VERSION}_android_arm64"
 PACKAGES_DIR="$BLUTTER_DIR/packages"
 PACKAGES_LIB="$PACKAGES_DIR/lib/$DARMVM_LIB_NAME/lib$DARMVM_LIB_NAME.a"
 
-if [ -f "$PACKAGES_LIB" ]; then
-    echo "Pre-built Dart VM lib found: $PACKAGES_LIB"
-    DARTVM_LIB="$PACKAGES_LIB"
-    DARTVM_INCLUDE_DIR="$PACKAGES_DIR/include/$DARMVM_LIB_NAME"
-else
-echo "Running dartvm_fetch_build.py $DART_VERSION android arm64..."
+# Use cached .a only if it is already ARM64
+if [ -f "$PACKAGES_LIB" ] && command -v file > /dev/null; then
+    FILE_OUT=$(file "$PACKAGES_LIB" 2>/dev/null || true)
+    if echo "$FILE_OUT" | grep -qi "ARM\|aarch64"; then
+        echo "Pre-built ARM64 Dart VM lib found: $PACKAGES_LIB"
+        DARTVM_LIB="$PACKAGES_LIB"
+        DARTVM_INCLUDE_DIR="$PACKAGES_DIR/include/$DARMVM_LIB_NAME"
+    else
+        echo "Cached lib is not ARM64, will rebuild: $FILE_OUT"
+    fi
+fi
 
-# Remove stale host-arch build (force rebuild with NDK toolchain)
+if [ -z "$DARTVM_LIB" ]; then
+    echo "Running dartvm_fetch_build.py $DART_VERSION android arm64..."
+
+# Remove stale host-arch build and lib (force rebuild with NDK toolchain)
 BLUTTER_BUILD_DIR="$BLUTTER_DIR/build"
 if [ -d "$BLUTTER_BUILD_DIR" ]; then
     echo "Removing stale build dir: $BLUTTER_BUILD_DIR"
     rm -rf "$BLUTTER_BUILD_DIR"
+fi
+if [ -f "$PACKAGES_LIB" ]; then
+    echo "Removing stale cached lib: $PACKAGES_LIB"
+    rm -f "$PACKAGES_DIR/lib/$DARMVM_LIB_NAME"/*.a
 fi
 
 python3 dartvm_fetch_build.py "$DART_VERSION" android arm64
