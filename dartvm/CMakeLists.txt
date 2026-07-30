@@ -186,7 +186,7 @@ target_compile_options(dartvm PRIVATE
 # may not expose std::atomic_ref; this provides a builtin-based fallback)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     target_compile_options(dartvm PRIVATE
-        -include "${CMAKE_CURRENT_SOURCE_DIR}/src/atomic_ref_compat.h"
+        "$<$<COMPILE_LANGUAGE:CXX>:-include;${CMAKE_CURRENT_SOURCE_DIR}/src/atomic_ref_compat.h>"
     )
 endif()
 

@@ -1,4 +1,5 @@
 #pragma once
+#ifdef __cplusplus
 #include <atomic>
 
 #if !defined(__cpp_lib_atomic_ref) || __cpp_lib_atomic_ref < 201806L
@@ -84,3 +85,4 @@ public:
 } // namespace std
 
 #endif // !__cpp_lib_atomic_ref
+#endif // __cplusplus
