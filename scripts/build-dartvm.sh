@@ -216,6 +216,9 @@ DARMVM_LIB_NAME="dartvm${DART_VERSION}_android_arm64"
 PACKAGES_DIR="$BLUTTER_DIR/packages"
 PACKAGES_LIB="$PACKAGES_DIR/lib/$DARMVM_LIB_NAME/lib$DARMVM_LIB_NAME.a"
 
+DARTVM_LIB=""
+DARTVM_INCLUDE_DIR=""
+
 # Use cached .a only if it is already ARM64
 if [ -f "$PACKAGES_LIB" ] && command -v file > /dev/null; then
     FILE_OUT=$(file "$PACKAGES_LIB" 2>/dev/null || true)
