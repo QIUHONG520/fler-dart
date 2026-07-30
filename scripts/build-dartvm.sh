@@ -92,7 +92,7 @@ with open('$BLUTTER_DARTAPP', 'r') as f:
 c, n = re.subn(
     r'const auto ep_addr = closure\.entry_point\(\) - base\(\);'
     r'\s+const auto& func = dart::Function::Handle\(closure\.function\(\)\);',
-    r'const auto\& func = dart::Function::Handle(closure.function());\n\t\t\tconst auto ep_addr = func.entry_point() - base();',
+    r'const auto& func = dart::Function::Handle(closure.function());\n\t\t\tconst auto ep_addr = func.entry_point() - base();',
     c
 )
 print(f'Patched {n} occurrences')
