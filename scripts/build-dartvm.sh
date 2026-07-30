@@ -131,7 +131,7 @@ echo "─── [1c] Patching CMake template for NDK cross-compile ───"
 
 BLUTTER_TEMPLATE="$BLUTTER_DIR/scripts/CMakeLists.txt"
 
-if [ ! -f "$BLUTTER_TEMPLATE.patched" ]; then
+if ! grep -q "fler-dart: Using NDK toolchain" "$BLUTTER_TEMPLATE" 2>/dev/null; then
     cp "$BLUTTER_TEMPLATE" "$BLUTTER_TEMPLATE.orig"
     
     # Insert NDK toolchain detection after the project() command
@@ -221,8 +221,16 @@ if [ -f "$PACKAGES_LIB" ]; then
     DARTVM_LIB="$PACKAGES_LIB"
     DARTVM_INCLUDE_DIR="$PACKAGES_DIR/include/$DARMVM_LIB_NAME"
 else
-    echo "Running dartvm_fetch_build.py $DART_VERSION android arm64..."
-    python3 dartvm_fetch_build.py "$DART_VERSION" android arm64
+echo "Running dartvm_fetch_build.py $DART_VERSION android arm64..."
+
+# Remove stale host-arch build (force rebuild with NDK toolchain)
+BLUTTER_BUILD_DIR="$BLUTTER_DIR/build"
+if [ -d "$BLUTTER_BUILD_DIR" ]; then
+    echo "Removing stale build dir: $BLUTTER_BUILD_DIR"
+    rm -rf "$BLUTTER_BUILD_DIR"
+fi
+
+python3 dartvm_fetch_build.py "$DART_VERSION" android arm64
 
     DARTVM_LIB=$(find "$PACKAGES_DIR/lib" -name "*.a" 2>/dev/null | head -1 || true)
     DARTVM_INCLUDE_DIR=$(find "$PACKAGES_DIR/include" -maxdepth 1 -type d -name "dartvm*" 2>/dev/null | head -1 || true)
@@ -244,11 +252,13 @@ echo "Dart include: $DARTVM_INCLUDE_DIR"
 # Verify ARM64
 if command -v file > /dev/null; then
     FILE_OUT=$(file "$DARTVM_LIB" 2>/dev/null || true)
+    echo "  $FILE_OUT"
     if echo "$FILE_OUT" | grep -qi "ARM\|aarch64"; then
         echo "  Architecture: ARM64 ✓"
     else
-        echo "  WARNING: $(echo "$FILE_OUT" | head -1)"
-        echo "  May be x86_64. NDK cross-compile may have failed."
+        echo "  ERROR: Dart VM lib is not ARM64!"
+        echo "  NDK cross-compile failed. Check CMake log above for 'fler-dart: Using NDK toolchain'"
+        exit 1
     fi
 fi
 
