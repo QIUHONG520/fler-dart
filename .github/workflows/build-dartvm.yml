@@ -220,10 +220,12 @@ jobs:
       - name: Create 7z archive
         run: |
           cd release
-          # -myfd=ARM64: 7-Zip 23.00+ 会自动为 ARM64 ELF 可执行文件加 ARM64 BCJ filter
+          # 7-Zip 23.00+ 会自动为 ARM64 ELF 可执行文件加 ARM64 BCJ filter
           # （方法 ID 0x0A），commons-compress 不支持该 filter（会报
-          # "Unsupported compression method [10]"）。禁用 ARM64 filter 以确保纯 LZMA2。
-          7z a -mx=9 -m0=lzma2 -myfd=ARM64 fler-engines.7z fler-engines/
+          # "Unsupported compression method [10]"）。
+          # runner 的 7-Zip 23.01 不支持 -myfd= 开关（24+ 才有），且所有引擎
+          # 都是 ARM64 ELF，故用 -mf=off 禁用全部过滤器，确保纯 LZMA2。
+          7z a -mx=9 -m0=lzma2 -mf=off fler-engines.7z fler-engines/
           echo ""
           echo "=== 7z archive ==="
           ls -lh fler-engines.7z
