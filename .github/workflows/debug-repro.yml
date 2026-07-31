@@ -87,7 +87,7 @@ jobs:
 
           # 目录模式必须同时包含 libapp.so 和 libflutter.so
           if [[ "$REPRO_INPUT" != "$PWD/input.bin" ]]; then
-            if ! { [[ -f "$REPRO_INPUT/libapp.so" ]] && [[ -f "$REPRO_INPUT/libflutter.so" ]]; then
+            if ! [[ -f "$REPRO_INPUT/libapp.so" && -f "$REPRO_INPUT/libflutter.so" ]]; then
               echo "ERROR: libs dir must contain BOTH libapp.so AND libflutter.so (only one lib is not enough)"
               ls -l "$REPRO_INPUT"
               exit 1
@@ -112,6 +112,7 @@ jobs:
         id: repro
         continue-on-error: true
         run: |
+          cd blutter
           set +e
           python3 blutter.py "$REPRO_INPUT" ../out > ../repro-main.log 2>&1
           echo "blutter exit=$?" | tee -a ../repro-main.log
