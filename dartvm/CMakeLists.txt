@@ -123,13 +123,17 @@ endif()
 
 # ─── Compile definitions ───
 # 注意：DARTVM_STATIC_LIB 是以裸 .a 链接的（不是导出的 CMake target），
-# 因此静态库构建时定义的 PUBLIC 宏（见 blutter scripts/CMakeLists.txt 模板：
-# DART_PRECOMPILED_RUNTIME / DART_TARGET_OS_ANDROID / TARGET_ARCH_ARM64 /
-# EXCLUDE_CFE_AND_KERNEL_PLATFORM）不会传播到本目标，必须在此显式补齐。
-# 其中 DART_PRECOMPILED_RUNTIME 尤为关键：
-#   - object.h 的 `Closure::entry_point()` 仅在 #if DART_PRECOMPILED_RUNTIME 下声明
-#   - blutter 解析 AOT 快照依赖该宏（Code/Closure 直接读 entry_point_ 字段，
-#     缺失会走 JIT 分支 → 入口地址错误 → classes.at(cid) 越界 / SIGSEGV@0x27）
+# 因此静态库构建时定义的 PUBLIC 宏（见 blutter scripts/CMakeLists.txt 模板）
+# 不会传播到本目标，必须在此显式补齐。关键宏及其作用：
+#   - DART_PRECOMPILED_RUNTIME：object.h 的 `Closure::entry_point()` 仅在其下声明；
+#     且 Code/Closure 的 entry_point 读取走 AOT 直接字段路径（缺失走 JIT 分支 → 解析错乱）。
+#   - PRODUCT：raw_object.h 用 `#if !defined(PRODUCT) && !defined(DART_PRECOMPILED_RUNTIME)`
+#     守卫多个原始对象字段（UntaggedClass.direct_subclasses、UntaggedFunction.var_descriptors、
+#     constant_coverage 等）。目标 APK 快照是 product 构建，缺失 PRODUCT 会导致结构体
+#     布局多出字段 → 偏移错位 → vector 越界 / SIGSEGV@0x27。这是运行时正确性的关键。
+#   - DART_TARGET_OS_ANDROID / TARGET_ARCH_ARM64 / EXCLUDE_CFE_AND_KERNEL_PLATFORM：
+#     对齐目标平台/最小化运行时。
+#   - U_USING_ICU_NAMESPACE=0：与宿主 blutter 完全一致的 ICU 命名空间定义。
 target_compile_definitions(dartvm PRIVATE
     DART_VERSION="${DART_VERSION}"
     DART_COMPRESSED_POINTERS
@@ -137,6 +141,8 @@ target_compile_definitions(dartvm PRIVATE
     DART_TARGET_OS_ANDROID
     TARGET_ARCH_ARM64
     EXCLUDE_CFE_AND_KERNEL_PLATFORM
+    PRODUCT
+    U_USING_ICU_NAMESPACE=0
     SQLITE_THREADSAFE=0
     SQLITE_OMIT_LOAD_EXTENSION
     NDEBUG
