@@ -220,11 +220,28 @@ jobs:
       - name: Create 7z archive
         run: |
           cd release
-          7z a -mx=9 -m0=lzma2 fler-engines.7z fler-engines/
+          # -myfd=ARM64: 7-Zip 23.00+ 会自动为 ARM64 ELF 可执行文件加 ARM64 BCJ filter
+          # （方法 ID 0x0A），commons-compress 不支持该 filter（会报
+          # "Unsupported compression method [10]"）。禁用 ARM64 filter 以确保纯 LZMA2。
+          7z a -mx=9 -m0=lzma2 -myfd=ARM64 fler-engines.7z fler-engines/
           echo ""
           echo "=== 7z archive ==="
           ls -lh fler-engines.7z
           7z l fler-engines.7z
+          cd ..
+
+      - name: Verify archive is commons-compress decodable
+        run: |
+          cd release
+          echo "=== Method per file (must NOT contain ARM64/BCJ/BCJ2) ==="
+          if 7z l -slt fler-engines.7z | grep -E "Method = .*(ARM64|BCJ|BCJ2)" ; then
+            echo "ERROR: archive contains unsupported filters (ARM64/BCJ/BCJ2)"
+            exit 1
+          fi
+          echo "OK: no unsupported filters"
+          echo ""
+          echo "=== Integrity test ==="
+          7z t fler-engines.7z
           cd ..
 
       - name: Generate checksums
