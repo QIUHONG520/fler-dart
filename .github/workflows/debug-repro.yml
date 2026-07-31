@@ -52,7 +52,9 @@ jobs:
           file input.bin
 
       # blutter.py 接受：APK（自动解 libapp/libflutter）或一个目录（含两个 .so）。
-      # 归一化为 REPRO_INPUT（apk 路径 或 含 libs 的目录），供后续步骤使用。
+      # 归一化为 REPRO_INPUT（apk 路径 或 含 libs 的目录）。
+      # 注意：$GITHUB_ENV 只对后续步骤生效，当前步骤内用普通 shell 变量 REPRO_INPUT，
+      #       同时写入 $GITHUB_ENV 供后续步骤（Run blutter.py / Instrument）读取。
       - name: Prepare blutter input (APK or extract libs archive)
         run: |
           echo "--- input.bin ---"
@@ -62,36 +64,38 @@ jobs:
           # 1) 若是 zip 且内含 lib/arm64-v8a/libapp.so → 视为 APK，原样交给 blutter.py
           if unzip -l input.bin 2>/dev/null | grep -q "lib/arm64-v8a/libapp.so"; then
             echo "Detected APK (contains lib/arm64-v8a/libapp.so)"
-            echo "REPRO_INPUT=$PWD/input.bin" >> "$GITHUB_ENV"
+            REPRO_INPUT="$PWD/input.bin"
           # 2) tar/gzip 压缩包 → 解包为 libs 目录
           elif file -b input.bin | grep -qiE "gzip|tar"; then
             echo "Detected tar/gzip archive -> extracting libs"
             mkdir -p libs
             tar -xzf input.bin -C libs
             ls -l libs
-            echo "REPRO_INPUT=$PWD/libs" >> "$GITHUB_ENV"
+            REPRO_INPUT="$PWD/libs"
           # 3) 其他 zip 压缩包 → 解包为 libs 目录
           elif unzip -l input.bin >/dev/null 2>&1; then
             echo "Detected zip archive -> extracting libs"
             mkdir -p libs
             unzip -o -q input.bin -d libs
             ls -l libs
-            echo "REPRO_INPUT=$PWD/libs" >> "$GITHUB_ENV"
-          # 4) 直接是 apk 文件（zip 头没识别到 libapp 时兜底）或裸文件
+            REPRO_INPUT="$PWD/libs"
+          # 4) 直接是 apk 文件或裸文件
           else
             echo "Treating input.bin as direct file (APK)"
-            echo "REPRO_INPUT=$PWD/input.bin" >> "$GITHUB_ENV"
+            REPRO_INPUT="$PWD/input.bin"
           fi
 
           # 目录模式必须同时包含 libapp.so 和 libflutter.so
           if [[ "$REPRO_INPUT" != "$PWD/input.bin" ]]; then
-            if ! { [[ -f "$REPRO_INPUT/libapp.so" ]] && [[ -f "$REPRO_INPUT/libflutter.so" ]]; }; then
+            if ! { [[ -f "$REPRO_INPUT/libapp.so" ]] && [[ -f "$REPRO_INPUT/libflutter.so" ]]; then
               echo "ERROR: libs dir must contain BOTH libapp.so AND libflutter.so (only one lib is not enough)"
               ls -l "$REPRO_INPUT"
               exit 1
             fi
           fi
+
           echo "REPRO_INPUT=$REPRO_INPUT"
+          echo "REPRO_INPUT=$REPRO_INPUT" >> "$GITHUB_ENV"
 
       - name: Clone Blutter (upstream, same source family as engine)
         run: |
