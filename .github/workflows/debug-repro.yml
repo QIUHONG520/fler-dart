@@ -42,7 +42,7 @@ jobs:
         run: |
           python3 -m venv .venv
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install capstone pyelftools lief
+          .venv/bin/pip install capstone pyelftools lief requests
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Download input asset (APK or libs archive)
