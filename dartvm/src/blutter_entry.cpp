@@ -114,7 +114,7 @@ static void createTables() {
 static std::string buildFunctionAsm(DartFunction* fn) {
     std::string out;
     if (!fn) return out;
-    const auto* data = fn->GetAnalyzedData();
+    auto* data = fn->GetAnalyzedData();
     if (data) {
         const auto& texts = data->asmTexts.Data();
         char buf[160];
