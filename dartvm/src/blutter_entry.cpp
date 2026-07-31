@@ -3,10 +3,10 @@
 // Fler's libfler.so via dlopen/dlsym.
 //
 // Pipeline:
-//   1. Create temp output directory
-//   2. Run Blutter analysis pipeline → pp.txt, objs.txt, asm/
-//   3. Parse output files into SQLite database
-//   4. Cleanup temp dir
+//   1. Run Blutter analysis (LoadInfo + CodeAnalyzer)
+//   2. Directly export classes/methods/pp_entries/strings from
+//      DartApp's in-memory structures into SQLite (no text-file parsing;
+//      之前的文本解析器与 blutter 真实输出格式不匹配，导致 classes/methods/strings 为空)
 //
 // Links against Blutter C++ sources + Dart VM static lib + Capstone + SQLite.
 
@@ -108,233 +108,136 @@ static void createTables() {
     );
 }
 
-// ─── pp.txt parser ──────────────────────────────
-struct PpEntry {
-    uint64_t pp_offset;
-    std::string type;
-    std::string value;
-};
+// ─── 直接内存导出（方案 A）─────────────────────
 
-static const char* trim(const char* s) {
-    while (*s == ' ' || *s == '\t') s++;
-    return s;
-}
-
-static bool parsePpLine(const std::string& line, PpEntry& entry) {
-    const char* p = line.c_str();
-    int n = 0;
-    if (sscanf(p, "%" SCNx64 ":%n", &entry.pp_offset, &n) < 1) return false;
-    p += n; p = trim(p);
-    entry.value = p;
-
-    if (entry.value.size() >= 2 && entry.value[0] == '\'' && entry.value.back() == '\'') {
-        entry.type = "String";
-    } else if (entry.value.find(" of ") != std::string::npos) {
-        auto pos = entry.value.find(" of ");
-        entry.type = entry.value.substr(pos + 4);
-    } else {
-        entry.type = entry.value;
+// 用 AnalyzedFnData 的 asm 文本生成函数反汇编（src_code，App 端 ASM 浏览用）
+static std::string buildFunctionAsm(const DartFunction* fn) {
+    std::string out;
+    if (!fn) return out;
+    const auto* data = fn->GetAnalyzedData();
+    if (data) {
+        const auto& texts = data->asmTexts.Data();
+        char buf[160];
+        for (const auto& t : texts) {
+            snprintf(buf, sizeof(buf), "// 0x%llx: %s\n",
+                     (unsigned long long)t.addr, t.text);
+            out += buf;
+        }
     }
-    return true;
+    if (out.empty()) {
+        out = fn->Name();
+    }
+    return out;
 }
 
-static void parsePpTxt(const char* path) {
-    std::ifstream file(path);
-    if (!file.is_open()) { fprintf(stderr, "Cannot open pp.txt\n"); return; }
-
-    const int BATCH = 500;
-    int count = 0;
-    std::string line;
+// 导出 classes + methods（直接遍历 DartApp 内存结构）
+static void exportClassesAndMethods(DartApp& app) {
+    const auto& libs = app.fler_libs();
+    int classes = 0, methods = 0;
     g_db.exec("BEGIN TRANSACTION");
 
-    while (std::getline(file, line)) {
-        if (line.empty()) continue;
-        PpEntry e;
-        if (!parsePpLine(line, e)) continue;
+    for (const auto* lib : libs) {
+        if (!lib) continue;
+        for (const auto* cls : lib->classes) {
+            if (!cls) continue;
 
-        sqlite3_stmt* stmt;
-        sqlite3_prepare_v2(g_db.db,
-            "INSERT OR IGNORE INTO pp_entries (pp_offset, type, value) VALUES (?, ?, ?)",
-            -1, &stmt, nullptr);
-        sqlite3_bind_int64(stmt, 1, (int64_t)e.pp_offset);
-        sqlite3_bind_text(stmt, 2, e.type.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 3, e.value.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_step(stmt); sqlite3_finalize(stmt);
-
-        if (e.type == "String" ||
-            e.value.find("_StringBase") != std::string::npos ||
-            e.value.find("_OneByteString") != std::string::npos) {
-            sqlite3_prepare_v2(g_db.db,
-                "INSERT OR IGNORE INTO strings (pp_offset, value) VALUES (?, ?)",
-                -1, &stmt, nullptr);
-            sqlite3_bind_int64(stmt, 1, (int64_t)e.pp_offset);
-            sqlite3_bind_text(stmt, 2, e.value.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_step(stmt); sqlite3_finalize(stmt);
-        }
-
-        if (++count % BATCH == 0) { g_db.exec("COMMIT"); g_db.exec("BEGIN TRANSACTION"); }
-    }
-    g_db.exec("COMMIT");
-    fprintf(stderr, "Parsed %d pp entries\n", count);
-}
-
-// ─── objs.txt parser ────────────────────────────
-static void parseObjsTxt(const char* path) {
-    std::ifstream file(path);
-    if (!file.is_open()) { fprintf(stderr, "Cannot open objs.txt\n"); return; }
-
-    const int BATCH = 200;
-    int count = 0;
-    std::string line;
-    uint64_t cur_pp = 0;
-    std::string cur_cls;
-
-    g_db.exec("BEGIN TRANSACTION");
-
-    auto flush = [&]() {
-        if (cur_pp == 0) return;
-        sqlite3_stmt* stmt;
-        sqlite3_prepare_v2(g_db.db,
-            "UPDATE pp_entries SET type = ? WHERE pp_offset = ?", -1, &stmt, nullptr);
-        sqlite3_bind_text(stmt, 1, cur_cls.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(stmt, 2, (int64_t)cur_pp);
-        sqlite3_step(stmt); sqlite3_finalize(stmt);
-    };
-
-    while (std::getline(file, line)) {
-        if (line.find(" (") != std::string::npos && line.find("): ") != std::string::npos) {
-            flush();
-            uint64_t s = 0, e = 0;
-            char cn[256] = {};
-            if (sscanf(line.c_str(), "%" SCNx64 " - %" SCNx64 " (%*[^)]) %255s", &s, &e, cn) >= 2) {
-                cur_pp = s; cur_cls = cn;
-                if (!cur_cls.empty() && cur_cls.back() == ':') cur_cls.pop_back();
-
-                sqlite3_stmt* stmt;
-                sqlite3_prepare_v2(g_db.db,
-                    "INSERT OR IGNORE INTO classes (id, name) VALUES (?, ?)", -1, &stmt, nullptr);
-                sqlite3_bind_int64(stmt, 1, (int64_t)s);
-                sqlite3_bind_text(stmt, 2, cur_cls.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_step(stmt); sqlite3_finalize(stmt);
-            }
-            continue;
-        }
-
-        if (!line.empty() && line[0] == ' ') {
-            const char* p = trim(line.c_str());
-            if (strncmp(p, "value: ", 7) == 0) {
-                const char* v = trim(p + 7);
-                std::string sv;
-                if (v[0] == '\'') { v++; const char* end = strchr(v, '\''); sv = end ? std::string(v, end - v) : v; }
-                else sv = v;
-                if (!sv.empty()) {
-                    sqlite3_stmt* stmt;
-                    sqlite3_prepare_v2(g_db.db,
-                        "UPDATE strings SET value = ? WHERE pp_offset = ?", -1, &stmt, nullptr);
-                    sqlite3_bind_text(stmt, 1, sv.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_int64(stmt, 2, (int64_t)cur_pp);
-                    sqlite3_step(stmt); sqlite3_finalize(stmt);
+            // classes (id, name, super_cls)
+            {
+                sqlite3_stmt* st = nullptr;
+                if (sqlite3_prepare_v2(g_db.db,
+                    "INSERT OR IGNORE INTO classes (id, name, super_cls) VALUES (?,?,?)",
+                    -1, &st, nullptr) == SQLITE_OK) {
+                    sqlite3_bind_int64(st, 1, (int64_t)cls->Id());
+                    sqlite3_bind_text(st, 2, cls->Name().c_str(), -1, SQLITE_TRANSIENT);
+                    const std::string super =
+                        cls->Parent() ? cls->Parent()->Name() : std::string();
+                    sqlite3_bind_text(st, 3, super.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_step(st);
                 }
+                sqlite3_finalize(st);
+                classes++;
+            }
+
+            // methods (class_id, name, address, size, src_code)
+            for (const auto* fn : cls->Functions()) {
+                if (!fn) continue;
+                const std::string asmText = buildFunctionAsm(fn);
+                sqlite3_stmt* st = nullptr;
+                if (sqlite3_prepare_v2(g_db.db,
+                    "INSERT INTO methods (class_id, name, address, size, src_code) VALUES (?,?,?,?,?)",
+                    -1, &st, nullptr) == SQLITE_OK) {
+                    sqlite3_bind_int64(st, 1, (int64_t)cls->Id());
+                    sqlite3_bind_text(st, 2, fn->Name().c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_int64(st, 3, (int64_t)fn->Address());
+                    sqlite3_bind_int64(st, 4, (int64_t)fn->Size());
+                    sqlite3_bind_text(st, 5, asmText.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_step(st);
+                }
+                sqlite3_finalize(st);
+                methods++;
             }
         }
-
-        if (line.find("=>") != std::string::npos) {
-            uint64_t pp = 0;
-            if (sscanf(line.c_str(), "%" SCNx64, &pp) >= 1) cur_pp = pp;
-        }
-
-        if (++count % BATCH == 0) { g_db.exec("COMMIT"); g_db.exec("BEGIN TRANSACTION"); }
     }
-    flush();
+
     g_db.exec("COMMIT");
-    fprintf(stderr, "Parsed %d obj entries\n", count);
+    fprintf(stderr, "fler-dart: exported %d classes, %d methods\n", classes, methods);
 }
 
-// ─── asm/*.txt parser ───────────────────────────
-struct MethodInfo {
-    std::string class_name, method_name;
-    uint64_t address = 0, size = 0;
-    std::string src_code;
-};
-
-static void parseAsmFile(const std::string& path, std::vector<MethodInfo>& out) {
-    std::ifstream file(path);
-    if (!file.is_open()) return;
-
-    MethodInfo cur;
-    std::string line;
-
-    auto flush = [&]() {
-        if (cur.address == 0) return;
-        if (!cur.src_code.empty() && cur.src_code.back() == '\n') cur.src_code.pop_back();
-        out.push_back(cur);
-        cur = MethodInfo{};
-    };
-
-    while (std::getline(file, line)) {
-        if (line.empty()) continue;
-        if (line[0] == ';') {
-            if (line.find("; Function: ") == 0) {
-                flush();
-                std::string fn = line.substr(12);
-                auto p = fn.find_last_of('.');
-                if (p != std::string::npos) { cur.class_name = fn.substr(0, p); cur.method_name = fn.substr(p + 1); }
-                else cur.method_name = fn;
-            } else if (line.find("; Address: 0x") == 0) sscanf(line.c_str(), "; Address: 0x%" SCNx64, &cur.address);
-            else if (line.find("; Size: 0x") == 0) sscanf(line.c_str(), "; Size: 0x%" SCNx64, &cur.size);
-            continue;
-        }
-        cur.src_code += line + "\n";
-    }
-    flush();
-}
-
-static void collectAsmFiles(const char* dir, std::vector<std::string>& out) {
-    DIR* d = opendir(dir); if (!d) return;
-    struct dirent* e;
-    while ((e = readdir(d)) != nullptr) {
-        std::string n(e->d_name);
-        if (n == "." || n == "..") continue;
-        std::string f = std::string(dir) + "/" + n;
-        if (e->d_type == DT_DIR) collectAsmFiles(f.c_str(), out);
-        else if (n.size() > 4 && n.substr(n.size() - 4) == ".txt") out.push_back(f);
-    }
-    closedir(d);
-}
-
-static void parseAsmDir(const char* dir_path) {
-    std::vector<std::string> files;
-    collectAsmFiles(dir_path, files);
-    std::vector<MethodInfo> methods;
-    for (auto& f : files) parseAsmFile(f, methods);
-    if (methods.empty()) return;
-
-    const int BATCH = 50;
-    int count = 0;
+// 导出 pp_entries + strings（复用 DartDumper 的对象池描述）
+static void exportObjectPool(DartApp& app, DartDumper& dumper) {
+    const auto& pool = app.GetObjectPool();
+    intptr_t num = pool.Length();
+    int pp = 0, strings = 0;
     g_db.exec("BEGIN TRANSACTION");
 
-    for (auto& m : methods) {
-        int64_t cid = 0;
-        sqlite3_stmt* stmt;
-        sqlite3_prepare_v2(g_db.db, "SELECT id FROM classes WHERE name = ? LIMIT 1", -1, &stmt, nullptr);
-        sqlite3_bind_text(stmt, 1, m.class_name.c_str(), -1, SQLITE_STATIC);
-        if (sqlite3_step(stmt) == SQLITE_ROW) cid = sqlite3_column_int64(stmt, 0);
-        sqlite3_finalize(stmt);
+    for (intptr_t i = 0; i < num; i++) {
+        intptr_t offset = dart::ObjectPool::OffsetFromIndex(i) + 1;
+        std::string desc = dumper.FlPoolDescription(offset, true);
+        if (desc.empty()) continue;
 
-        sqlite3_prepare_v2(g_db.db,
-            "INSERT OR REPLACE INTO methods (name, address, size, src_code, class_id) VALUES (?, ?, ?, ?, ?)",
-            -1, &stmt, nullptr);
-        sqlite3_bind_text(stmt, 1, m.method_name.c_str(), -1, SQLITE_STATIC);
-        sqlite3_bind_int64(stmt, 2, (int64_t)m.address);
-        sqlite3_bind_int64(stmt, 3, (int64_t)m.size);
-        sqlite3_bind_text(stmt, 4, m.src_code.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(stmt, 5, cid);
-        sqlite3_step(stmt); sqlite3_finalize(stmt);
+        // 拆 type / value（"Type: value" 形式）
+        std::string type, value;
+        auto pos = desc.find(": ");
+        if (pos != std::string::npos && pos > 0) {
+            type = desc.substr(0, pos);
+            value = desc.substr(pos + 2);
+        } else {
+            type = "";
+            value = desc;
+        }
 
-        if (++count % BATCH == 0) { g_db.exec("COMMIT"); g_db.exec("BEGIN TRANSACTION"); }
+        sqlite3_stmt* st = nullptr;
+        if (sqlite3_prepare_v2(g_db.db,
+            "INSERT OR IGNORE INTO pp_entries (pp_offset, type, value) VALUES (?,?,?)",
+            -1, &st, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int64(st, 1, (int64_t)offset);
+            sqlite3_bind_text(st, 2, type.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(st, 3, value.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_step(st);
+        }
+        sqlite3_finalize(st);
+        pp++;
+
+        // String 类型同时进 strings 表（去掉引号）
+        if (type == "String") {
+            std::string sv = value;
+            if (sv.size() >= 2 && sv.front() == '"' && sv.back() == '"')
+                sv = sv.substr(1, sv.size() - 2);
+            sqlite3_stmt* s2 = nullptr;
+            if (sqlite3_prepare_v2(g_db.db,
+                "INSERT OR IGNORE INTO strings (pp_offset, value) VALUES (?,?)",
+                -1, &s2, nullptr) == SQLITE_OK) {
+                sqlite3_bind_int64(s2, 1, (int64_t)offset);
+                sqlite3_bind_text(s2, 2, sv.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_step(s2);
+            }
+            sqlite3_finalize(s2);
+            strings++;
+        }
     }
+
     g_db.exec("COMMIT");
-    fprintf(stderr, "Parsed %zu methods\n", methods.size());
+    fprintf(stderr, "fler-dart: exported %d pp entries, %d strings\n", pp, strings);
 }
 
 // ─── Temp dir helpers ──────────────────────────
@@ -381,33 +284,24 @@ int blutter_analyze(const char* so_path, const char* db_path) {
 #ifndef NO_CODE_ANALYSIS
         app.EnterScope(); CodeAnalyzer ca{ app }; ca.AnalyzeAll(); app.ExitScope();
 #endif
+        if (!g_db.open(db_path)) { removeDir(tmpdir); return -3; }
+        createTables();
+
         app.EnterScope();
-        DartDumper dumper{ app };
-        fs::path out{ tmpdir };
-        dumper.DumpObjectPool((out / "pp.txt").string().c_str());
-        dumper.DumpObjects((out / "objs.txt").string().c_str());
-        dumper.DumpCode((out / "asm").string().c_str());
+        {
+            DartDumper dumper{ app };
+            exportClassesAndMethods(app);
+            exportObjectPool(app, dumper);
+        }
         app.ExitScope();
+
+        g_db.close();
     } catch (std::exception& e) {
         fprintf(stderr, "fler-dart: analysis failed: %s\n", e.what());
         removeDir(tmpdir); return -2;
     }
 
-    if (!g_db.open(db_path)) { removeDir(tmpdir); return -3; }
-    createTables();
-
-    parsePpTxt((std::string(tmpdir) + "/pp.txt").c_str());
-    parseObjsTxt((std::string(tmpdir) + "/objs.txt").c_str());
-
-    std::string asm_dir = std::string(tmpdir) + "/asm";
-    struct stat st;
-    if (stat(asm_dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) parseAsmDir(asm_dir.c_str());
-    else fprintf(stderr, "fler-dart: asm/ not found\n");
-
-    g_db.exec("UPDATE strings SET ref_count = (SELECT COUNT(*) FROM string_refs WHERE string_id = strings.id)");
-    g_db.close();
     removeDir(tmpdir);
-
     fprintf(stderr, "fler-dart: done, db = %s\n", db_path);
     return 0;
 }

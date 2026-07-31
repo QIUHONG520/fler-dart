@@ -254,12 +254,59 @@ echo "Blutter: $BLUTTER_DIR @ $(git -C "$BLUTTER_DIR" rev-parse HEAD)"
 
 # ═══════════════════════════════════════════════
 # Step 1b / 1b-elf：已移除
-# - Step 1b（closure.entry_point → func.entry_point）仅为 Dart 3.12.2+ 编译兼容；
-#   3.12.2 已从构建矩阵移除，其余版本 ≤3.12.1 的 Closure::entry_point() 均存在，
-#   无需补丁即可编译（宿主 Debug Repro 已用无补丁 528acbe 验证 3.12.1 正常分析）。
-#   且该补丁对 3.12.1 运行时有害（真机 SIGSEGV@0x27，DartApp.cpp closure 分支）。
-# - patch-elfhelper：528acbe 的 ElfHelper 宿主验证可正常分析 Bit.apk，非必需。
+# - Step 1b（closure.entry_point → func.entry_point）曾为编译兼容，但 DART_PRECOMPILED_RUNTIME
+#   补齐后 Closure::entry_point() 在所有矩阵版本均存在，无需补丁。
+# - patch-elfhelper：528acbe 的 ElfHelper 宿主验证可正常分析，非必需。
 # ═══════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════
+# Step 1d: Patch Blutter for direct in-memory DB export（非侵入式）
+# - DartApp.h: 添加 fler_libs() 访问器（暴露 libs 私有成员）
+# - DartDumper.h: 公开 FlPoolDescription() 包装 getPoolObjectDescription()
+# 仅新增访问器/公开方法，不改变任何行为。幂等：已含 fler-dart 标记则跳过。
+# ═══════════════════════════════════════════════
+echo ""
+echo "─── [1d] Patching Blutter for direct export accessors ───"
+
+BLUTTER_DARTAPP_H="$BLUTTER_DIR/blutter/src/DartApp.h"
+if ! grep -q "fler_libs" "$BLUTTER_DARTAPP_H" 2>/dev/null; then
+    python3 - "$BLUTTER_DARTAPP_H" << 'PYEOF'
+import sys
+path = sys.argv[1]
+s = open(path, encoding='utf-8').read()
+accessor = (
+    "\n\t// fler-dart: accessors for direct in-memory DB export\n"
+    "\tconst std::vector<DartLibrary*>& fler_libs() const { return libs; }\n"
+    "\n"
+)
+needle = "\nprivate:\n"
+assert needle in s, "DartApp.h private: marker not found"
+s = s.replace(needle, accessor + needle, 1)
+open(path, 'w', encoding='utf-8').write(s)
+print("  DartApp.h: fler_libs() accessor added")
+PYEOF
+fi
+
+BLUTTER_DARTDUMPER_H="$BLUTTER_DIR/blutter/src/DartDumper.h"
+if ! grep -q "FlPoolDescription" "$BLUTTER_DARTDUMPER_H" 2>/dev/null; then
+    python3 - "$BLUTTER_DARTDUMPER_H" << 'PYEOF'
+import sys
+path = sys.argv[1]
+s = open(path, encoding='utf-8').read()
+wrapper = (
+    "\n\t// fler-dart: expose pool description for direct in-memory DB export\n"
+    "\tstd::string FlPoolDescription(intptr_t offset, bool simpleForm = true) {\n"
+    "\t\treturn getPoolObjectDescription(offset, simpleForm);\n"
+    "\t}\n"
+    "\n"
+)
+needle = "\nprivate:\n"
+assert needle in s, "DartDumper.h private: marker not found"
+s = s.replace(needle, wrapper + needle, 1)
+open(path, 'w', encoding='utf-8').write(s)
+print("  DartDumper.h: FlPoolDescription() added")
+PYEOF
+fi
 
 # ═══════════════════════════════════════════════
 # Step 1c: Inject NDK toolchain + ICU fixes
