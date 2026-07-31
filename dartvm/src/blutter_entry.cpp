@@ -111,7 +111,7 @@ static void createTables() {
 // ─── 直接内存导出（方案 A）─────────────────────
 
 // 用 AnalyzedFnData 的 asm 文本生成函数反汇编（src_code，App 端 ASM 浏览用）
-static std::string buildFunctionAsm(const DartFunction* fn) {
+static std::string buildFunctionAsm(DartFunction* fn) {
     std::string out;
     if (!fn) return out;
     const auto* data = fn->GetAnalyzedData();
@@ -136,9 +136,9 @@ static void exportClassesAndMethods(DartApp& app) {
     int classes = 0, methods = 0;
     g_db.exec("BEGIN TRANSACTION");
 
-    for (const auto* lib : libs) {
+    for (auto* lib : libs) {
         if (!lib) continue;
-        for (const auto* cls : lib->classes) {
+        for (auto* cls : lib->classes) {
             if (!cls) continue;
 
             // classes (id, name, super_cls)
@@ -159,7 +159,7 @@ static void exportClassesAndMethods(DartApp& app) {
             }
 
             // methods (class_id, name, address, size, src_code)
-            for (const auto* fn : cls->Functions()) {
+            for (auto* fn : cls->Functions()) {
                 if (!fn) continue;
                 const std::string asmText = buildFunctionAsm(fn);
                 sqlite3_stmt* st = nullptr;
