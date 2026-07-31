@@ -1,0 +1,225 @@
+# =============================================================================
+# Debug Repro — 复现 Blutter 对指定 APK 的 "analysis failed: vector"
+#
+# 用途：定位 flutter APK 分析失败的根因（blutter 源码 bug vs fler-dart 构建宏）。
+# 触发：workflow_dispatch，输入 Bit.apk 的直接下载 URL。
+#
+# 步骤：
+#   1. 下载 APK
+#   2. 克隆上游 blutter（与引擎同源）
+#   3. python blutter.py Bit.apk out/  —— 宿主 linux-x64 复现（Dart VM 自动构建）
+#   4. 宏差异诊断：blutter.py 自动推导的布局宏 vs build-dartvm.sh 硬编码宏
+#   5. 若复现 vector：给 DartApp.cpp::GetClass 打日志补丁重跑（拿精确越界值）
+#      + --no-analysis 变体重跑（二分定位阶段）
+#   6. 上传 out/ + 全部日志
+# =============================================================================
+name: Debug Repro (blutter analysis)
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_url:
+        description: 'Direct URL to Bit.apk, OR a zip/tar.gz containing libapp.so + libflutter.so'
+        required: true
+        type: string
+
+jobs:
+  repro:
+    name: Reproduce blutter analysis failure
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fler-dart
+        uses: actions/checkout@v4
+        with:
+          path: fler-dart
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build python3 python3-venv python3-pip curl git build-essential unzip
+
+      - name: Set up Python venv with blutter deps
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install capstone pyelftools lief
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Download input asset (APK or libs archive)
+        run: |
+          curl -L --fail "${{ github.event.inputs.asset_url }}" -o input.bin
+          ls -lh input.bin
+          file input.bin
+
+      # blutter.py 接受：APK（自动解 libapp/libflutter）或一个目录（含两个 .so）。
+      # 归一化为 REPRO_INPUT（apk 路径 或 含 libs 的目录），供后续步骤使用。
+      - name: Prepare blutter input (APK or extract libs archive)
+        run: |
+          echo "--- input.bin ---"
+          ls -lh input.bin
+          file input.bin
+
+          # 1) 若是 zip 且内含 lib/arm64-v8a/libapp.so → 视为 APK，原样交给 blutter.py
+          if unzip -l input.bin 2>/dev/null | grep -q "lib/arm64-v8a/libapp.so"; then
+            echo "Detected APK (contains lib/arm64-v8a/libapp.so)"
+            echo "REPRO_INPUT=$PWD/input.bin" >> "$GITHUB_ENV"
+          # 2) tar/gzip 压缩包 → 解包为 libs 目录
+          elif file -b input.bin | grep -qiE "gzip|tar"; then
+            echo "Detected tar/gzip archive -> extracting libs"
+            mkdir -p libs
+            tar -xzf input.bin -C libs
+            ls -l libs
+            echo "REPRO_INPUT=$PWD/libs" >> "$GITHUB_ENV"
+          # 3) 其他 zip 压缩包 → 解包为 libs 目录
+          elif unzip -l input.bin >/dev/null 2>&1; then
+            echo "Detected zip archive -> extracting libs"
+            mkdir -p libs
+            unzip -o -q input.bin -d libs
+            ls -l libs
+            echo "REPRO_INPUT=$PWD/libs" >> "$GITHUB_ENV"
+          # 4) 直接是 apk 文件（zip 头没识别到 libapp 时兜底）或裸文件
+          else
+            echo "Treating input.bin as direct file (APK)"
+            echo "REPRO_INPUT=$PWD/input.bin" >> "$GITHUB_ENV"
+          fi
+
+          # 目录模式必须同时包含 libapp.so 和 libflutter.so
+          if [[ "$REPRO_INPUT" != "$PWD/input.bin" ]]; then
+            if ! { [[ -f "$REPRO_INPUT/libapp.so" ]] && [[ -f "$REPRO_INPUT/libflutter.so" ]]; }; then
+              echo "ERROR: libs dir must contain BOTH libapp.so AND libflutter.so (only one lib is not enough)"
+              ls -l "$REPRO_INPUT"
+              exit 1
+            fi
+          fi
+          echo "REPRO_INPUT=$REPRO_INPUT"
+
+      - name: Clone Blutter (upstream, same source family as engine)
+        run: |
+          git clone https://github.com/worawit/blutter.git blutter
+          cd blutter
+          git log --oneline -3
+          echo "blutter commit: $(git rev-parse HEAD)"
+
+      # ─────────────────────────────────────────────────────────────
+      # 主复现：python blutter.py <apk> <out>
+      # 自动检测 Dart 版本/快照 hash/flags → 构建 DartVM 静态库 → 构建引擎 → 运行
+      # ─────────────────────────────────────────────────────────────
+      - name: Run blutter.py (main repro)
+        id: repro
+        continue-on-error: true
+        run: |
+          set +e
+          python3 blutter.py "$REPRO_INPUT" ../out > ../repro-main.log 2>&1
+          echo "blutter exit=$?" | tee -a ../repro-main.log
+          set -e
+          echo "----- repro-main.log (full) -----"
+          cat ../repro-main.log
+          echo "----- repro-main.log (tail 80) -----"
+          tail -80 ../repro-main.log
+
+      - name: Classify repro result
+        id: classify
+        run: |
+          if grep -q "exception:" repro-main.log; then
+            echo "result=failed_vector" >> "$GITHUB_OUTPUT"
+          elif ls out/pp.txt >/dev/null 2>&1 || grep -q "Generating Frida script" repro-main.log; then
+            echo "result=success" >> "$GITHUB_OUTPUT"
+          elif grep -qE "blutter exit=0" repro-main.log; then
+            echo "result=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=other_failure" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ─────────────────────────────────────────────────────────────
+      # 宏差异诊断：blutter.py 自动推导的布局宏 vs build-dartvm.sh 硬编码宏
+      # （本步是判定 "引擎构建宏缺失" 的关键证据）
+      # ─────────────────────────────────────────────────────────────
+      - name: Macro diff diagnostic (SDK headers vs build-dartvm.sh)
+        run: |
+          echo "===== blutter.py find_compat_macro output ====="
+          cd blutter
+          python3 - <<'PYEOF'
+          import importlib.util, sys, os, glob
+          inc = glob.glob("packages/include/dartvm3.12.1/vm")
+          print("SDK include vm dir:", inc[:2])
+          if not inc:
+              print("!! SDK headers not found under packages/include/dartvm3.12.1 (fetch may have failed)")
+              sys.exit(0)
+          spec = importlib.util.spec_from_file_location("blutter", "blutter.py")
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          macros = mod.find_compat_macro("3.12.1", False)
+          print("MACROS blutter.py would use for 3.12.1:")
+          for m in macros:
+              print("  " + m)
+          PYEOF
+          cd ..
+          echo ""
+          echo "===== build-dartvm.sh VERSION_DEFINES logic ====="
+          sed -n '456,476p' fler-dart/scripts/build-dartvm.sh
+          echo ""
+          echo "===== raw sentinel grep on fetched SDK headers ====="
+          VMDIR=blutter/packages/include/dartvm3.12.1/vm
+          echo "VMDIR=$VMDIR"
+          if [ -n "$VMDIR" ]; then
+            for probe in \
+              "HAS_SHARED_CLASS_TABLE:class_table.h:class SharedClassTable {" \
+              "OLD_MAP_SET_NAME:class_id.h:V(LinkedHashMap)" \
+              "OLD_MAP_NO_IMMUTABLE:class_id.h:V(ImmutableLinkedHashMap)" \
+              "NO_LAST_INTERNAL_ONLY_CID:class_id.h: kLastInternalOnlyCid " \
+              "HAS_TYPE_REF:class_id.h:V(TypeRef)" \
+              "HAS_RECORD_TYPE:class_id.h:V(RecordType)" \
+              "NO_INIT_LATE_STATIC_FIELD:stub_code_list.h:V(InitLateStaticField)" \
+              "UNIFORM_INTEGER_ACCESS:object.h:AsTruncatedInt64Value()" \
+              "NO_METHOD_EXTRACTOR_STUB:object_store.h:build_generic_method_extractor_code"; do
+              name="${probe%%:*}"; rest="${probe#*:}"; f="${rest%%:*}"; s="${rest#*:}"
+              hit=$(grep -cF "$s" "$VMDIR/$f" 2>/dev/null || true)
+              echo "  $name : $hit occurrences of '$s'"
+            done
+          fi
+
+      # ─────────────────────────────────────────────────────────────
+      # 若复现 vector：打日志补丁拿精确越界值 + --no-analysis 二分
+      # ─────────────────────────────────────────────────────────────
+      - name: Instrument DartApp::GetClass and re-run (if vector reproduced)
+        if: steps.classify.outputs.result == 'failed_vector'
+        run: |
+          set -e
+          cd blutter
+          echo "===== patch DartApp.cpp::GetClass to log cid/sizes ====="
+          python3 - <<'PYEOF'
+          import re
+          p = 'blutter/src/DartApp.cpp'
+          s = open(p, encoding='utf-8', errors='ignore').read()
+          pat = re.compile(r'(DartClass\*\s+DartApp::GetClass\(intptr_t cid\)\s*\{\s*\n)')
+          def repl(m):
+              return (m.group(1) +
+                  '\tfprintf(stderr, "[GetClass] cid=%lld classes.size=%zu topClasses.size=%zu\\n", '
+                  '(long long)cid, classes.size(), topClasses.size());\n')
+          s2 = pat.sub(repl, s, count=1)
+          assert s2 != s, 'GetClass patch did not apply (signature changed?)'
+          open(p, 'w', encoding='utf-8').write(s2)
+          print('GetClass instrumentation applied')
+          PYEOF
+          cd ..
+          echo "===== instrumented run (--rebuild) ====="
+          (cd blutter && python3 blutter.py "$REPRO_INPUT" ../out2 --rebuild) > repro-instrumented.log 2>&1 || true
+          tail -120 repro-instrumented.log
+          echo "===== no-analysis run (--rebuild --no-analysis) ====="
+          (cd blutter && python3 blutter.py "$REPRO_INPUT" ../out3 --rebuild --no-analysis) > repro-noanalysis.log 2>&1 || true
+          tail -60 repro-noanalysis.log
+
+      - name: Upload artifacts (out/ + logs)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repro-outputs
+          path: |
+            out/
+            out2/
+            out3/
+            repro-main.log
+            repro-instrumented.log
+            repro-noanalysis.log
+          retention-days: 30
+          if-no-files-found: ignore
