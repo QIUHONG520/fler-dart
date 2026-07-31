@@ -122,9 +122,21 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
 endif()
 
 # ─── Compile definitions ───
+# 注意：DARTVM_STATIC_LIB 是以裸 .a 链接的（不是导出的 CMake target），
+# 因此静态库构建时定义的 PUBLIC 宏（见 blutter scripts/CMakeLists.txt 模板：
+# DART_PRECOMPILED_RUNTIME / DART_TARGET_OS_ANDROID / TARGET_ARCH_ARM64 /
+# EXCLUDE_CFE_AND_KERNEL_PLATFORM）不会传播到本目标，必须在此显式补齐。
+# 其中 DART_PRECOMPILED_RUNTIME 尤为关键：
+#   - object.h 的 `Closure::entry_point()` 仅在 #if DART_PRECOMPILED_RUNTIME 下声明
+#   - blutter 解析 AOT 快照依赖该宏（Code/Closure 直接读 entry_point_ 字段，
+#     缺失会走 JIT 分支 → 入口地址错误 → classes.at(cid) 越界 / SIGSEGV@0x27）
 target_compile_definitions(dartvm PRIVATE
     DART_VERSION="${DART_VERSION}"
     DART_COMPRESSED_POINTERS
+    DART_PRECOMPILED_RUNTIME
+    DART_TARGET_OS_ANDROID
+    TARGET_ARCH_ARM64
+    EXCLUDE_CFE_AND_KERNEL_PLATFORM
     SQLITE_THREADSAFE=0
     SQLITE_OMIT_LOAD_EXTENSION
     NDEBUG
