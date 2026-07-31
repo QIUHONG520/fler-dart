@@ -19,7 +19,7 @@
 #   libc++_shared.so — NDK C++ standard library
 #
 # Usage (engine build — per Dart version):
-#   bash build-dartvm.sh --dart-version 3.12.2
+#   bash build-dartvm.sh --dart-version 3.12.1
 #
 # Usage (shared libs build — once):
 #   bash build-dartvm.sh --build-shared-libs-only
@@ -253,58 +253,12 @@ git -C "$BLUTTER_DIR" checkout -f FETCH_HEAD
 echo "Blutter: $BLUTTER_DIR @ $(git -C "$BLUTTER_DIR" rev-parse HEAD)"
 
 # ═══════════════════════════════════════════════
-# Step 1b: Patch Blutter source for Dart 3.12.x API compat（编译必需）
-# ═══════════════════════════════════════════════
-# 528acbe 的 `Closure::entry_point()` 在 Dart 3.12.2+ 头文件中已移除
-# （宿主仅验证 3.12.1 的 Closure 仍带 entry_point，故未触发）。改为经
-# `Function::Handle(closure.function()).entry_point()` 访问，语义等价，
-# 仅编译兼容，不影响运行时快照解析。有守卫：源码已改则跳过。
-echo ""
-echo "─── [1b] Patching Blutter for Dart SDK API compat ───"
-
-BLUTTER_DARTAPP="$BLUTTER_DIR/blutter/src/DartApp.cpp"
-if grep -q "closure\.entry_point()" "$BLUTTER_DARTAPP" 2>/dev/null; then
-    echo "Patching DartApp.cpp: closure.entry_point() → func.entry_point()"
-    python3 -c "
-import re
-with open('$BLUTTER_DARTAPP', 'r') as f:
-    c = f.read()
-c, n = re.subn(
-    r'const auto ep_addr = closure\.entry_point\(\) - base\(\);'
-    r'\s+const auto& func = dart::Function::Handle\(closure\.function\(\)\);',
-    r'const auto& func = dart::Function::Handle(closure.function());\n\t\t\tconst auto ep_addr = func.entry_point() - base();',
-    c
-)
-print(f'  DartApp.cpp: {n} occurrences')
-with open('$BLUTTER_DARTAPP', 'w') as f:
-    f.write(c)
-"
-fi
-
-BLUTTER_DARTDUMPER="$BLUTTER_DIR/blutter/src/DartDumper.cpp"
-if grep -q "closure\.entry_point()" "$BLUTTER_DARTDUMPER" 2>/dev/null; then
-    echo "Patching DartDumper.cpp: closure.entry_point() → Function::Handle entry_point()"
-    python3 -c "
-with open('$BLUTTER_DARTDUMPER', 'r') as f:
-    c = f.read()
-c = c.replace(
-    'closure.entry_point() - app.base()',
-    'dart::Function::Handle(closure.function()).entry_point() - app.base()'
-)
-c = c.replace(
-    'closure.entry_point()',
-    'dart::Function::Handle(closure.function()).entry_point()'
-)
-print(f'  DartDumper.cpp patched')
-with open('$BLUTTER_DARTDUMPER', 'w') as f:
-    f.write(c)
-"
-fi
-
-# ═══════════════════════════════════════════════
-# Step 1b-elf (patch-elfhelper)：保持移除
-# 528acbe 的 ElfHelper 在宿主验证可正常分析 Bit.apk（.dynstr 可找到）；
-# 该补丁是旧 blutter 的防御性 workaround，对已验证 commit 非必需。
+# Step 1b / 1b-elf：已移除
+# - Step 1b（closure.entry_point → func.entry_point）仅为 Dart 3.12.2+ 编译兼容；
+#   3.12.2 已从构建矩阵移除，其余版本 ≤3.12.1 的 Closure::entry_point() 均存在，
+#   无需补丁即可编译（宿主 Debug Repro 已用无补丁 528acbe 验证 3.12.1 正常分析）。
+#   且该补丁对 3.12.1 运行时有害（真机 SIGSEGV@0x27，DartApp.cpp closure 分支）。
+# - patch-elfhelper：528acbe 的 ElfHelper 宿主验证可正常分析 Bit.apk，非必需。
 # ═══════════════════════════════════════════════
 
 # ═══════════════════════════════════════════════

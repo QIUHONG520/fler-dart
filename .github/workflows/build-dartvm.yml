@@ -19,7 +19,7 @@ on:
 
 env:
   NDK_VERSION: ${{ inputs.ndk-version || 'r27' }}
-  DART_VERSIONS: '3.12.2 3.12.1 3.12.0 3.11.5 3.11.4 3.10.7 3.10.6 3.10.4 3.9.2 3.9.1 3.8.1 3.8.0'
+  DART_VERSIONS: '3.12.1 3.12.0 3.11.5 3.11.4 3.10.7 3.10.6 3.10.4 3.9.2 3.9.1 3.8.1 3.8.0'
 
 jobs:
   # ══════════════════════════════════════════════════════════
@@ -93,7 +93,6 @@ jobs:
       fail-fast: false
       matrix:
         dart-version:
-          - '3.12.2'
           - '3.12.1'
           - '3.12.0'
           - '3.11.5'
@@ -137,9 +136,9 @@ jobs:
           path: |
             /tmp/fler-dart-cache/dartvm_${{ matrix.dart-version }}/blutter
             /tmp/fler-dart-cache/dartvm_${{ matrix.dart-version }}/blutter/packages
-          key: dartvm-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v13-528acbe-dynamic
+          key: dartvm-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v14-no3122-dynamic
           restore-keys: |
-            dartvm-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v12
+            dartvm-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v13
 
       - name: Patch blutter_entry.cpp (TMPDIR support)
         run: bash fler-dart/scripts/patch-tmpdir.sh
@@ -308,7 +307,7 @@ jobs:
 
             | Category | Files |
             |----------|-------|
-            | **Engines** | `dartvm_3.12.2.so`, `dartvm_3.12.1.so`, `dartvm_3.12.0.so`, `dartvm_3.11.5.so`, `dartvm_3.11.4.so`, `dartvm_3.10.7.so`, `dartvm_3.10.6.so`, `dartvm_3.10.4.so`, `dartvm_3.9.2.so`, `dartvm_3.9.1.so`, `dartvm_3.8.1.so`, `dartvm_3.8.0.so` |
+            | **Engines** | `dartvm_3.12.1.so`, `dartvm_3.12.0.so`, `dartvm_3.11.5.so`, `dartvm_3.11.4.so`, `dartvm_3.10.7.so`, `dartvm_3.10.6.so`, `dartvm_3.10.4.so`, `dartvm_3.9.2.so`, `dartvm_3.9.1.so`, `dartvm_3.8.1.so`, `dartvm_3.8.0.so` |
             | **Shared Libs** | `libcapstone.so`, `libicuuc.so`, `libicudata.so`, `libc++_shared.so` |
 
             ### Architecture
@@ -328,7 +327,6 @@ jobs:
                │   ├── libicuuc.so
                │   ├── libicudata.so
                │   └── libc++_shared.so
-               ├── dartvm_3.12.2.so
                ├── dartvm_3.12.1.so
                ├── dartvm_3.12.0.so
                ├── dartvm_3.11.5.so
