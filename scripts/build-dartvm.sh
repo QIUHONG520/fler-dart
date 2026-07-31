@@ -291,6 +291,15 @@ with open('$BLUTTER_DARTDUMPER', 'w') as f:
 fi
 
 # ═══════════════════════════════════════════════
+# Step 1b-elf: Patch ElfHelper.cpp (null-check dynstr/dynsym)
+# 避免 .dynstr 未找到时 nullptr + dynsym->name → SIGSEGV
+# ═══════════════════════════════════════════════
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/patch-elfhelper.sh" ]; then
+    bash "$SCRIPT_DIR/patch-elfhelper.sh" "$BLUTTER_DIR"
+fi
+
+# ═══════════════════════════════════════════════
 # Step 1c: Inject NDK toolchain + ICU fixes
 # ═══════════════════════════════════════════════
 echo ""
