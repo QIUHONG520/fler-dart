@@ -137,9 +137,9 @@ jobs:
           path: |
             /tmp/fler-dart-cache/dartvm_${{ matrix.dart-version }}/blutter
             /tmp/fler-dart-cache/dartvm_${{ matrix.dart-version }}/blutter/packages
-          key: dartvm-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v12-dynamic
+          key: dartvm-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v13-528acbe-dynamic
           restore-keys: |
-            dartvm-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v11
+            dartvm-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v12
 
       - name: Patch blutter_entry.cpp (TMPDIR support)
         run: bash fler-dart/scripts/patch-tmpdir.sh

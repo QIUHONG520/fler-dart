@@ -33,6 +33,10 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_ROOT=""
 JOBS=$(nproc 2>/dev/null || echo 4)
 BLUTTER_REPO="https://github.com/worawit/blutter.git"
+# 固定 blutter commit：528acbe 为 Debug Repro 宿主实测可正常分析 Dart 3.12.1 的版本
+# （详见 dev-progress 引擎根因排查）。不随上游漂移，保证引擎与宿主行为一致。
+# 该 commit 无需任何 fler-dart 补丁（Step 1b / patch-elfhelper 已移除）。
+BLUTTER_COMMIT="528acbe83ba35a3a53fb97b231cb5f968c7068d1"
 USE_SHARED_CAPSTONE="ON"   # ON = dynamic linking (default v3), OFF = static (legacy)
 BUILD_SHARED_LIBS_ONLY="0"
 PREBUILT_SHARED_LIBS_DIR=""
@@ -233,71 +237,27 @@ echo " Build root:   $BUILD_ROOT"
 echo "════════════════════════════════════════════"
 
 # ═══════════════════════════════════════════════
-# Step 1: Clone Blutter
+# Step 1: Clone Blutter（固定到已验证 commit）
 # ═══════════════════════════════════════════════
 echo ""
-echo "─── [1/5] Cloning Blutter ───"
+echo "─── [1/5] Cloning Blutter @ ${BLUTTER_COMMIT} ───"
+# 每次都强制拉取并 checkout 固定 commit，避免 CI 缓存的旧 blutter 被静默复用
 if [ ! -d "$BLUTTER_DIR" ]; then
-    git clone --depth 1 "$BLUTTER_REPO" "$BLUTTER_DIR"
+    mkdir -p "$BLUTTER_DIR"
 fi
-echo "Blutter: $BLUTTER_DIR"
+git -C "$BLUTTER_DIR" init -q 2>/dev/null || true
+git -C "$BLUTTER_DIR" remote remove origin 2>/dev/null || true
+git -C "$BLUTTER_DIR" remote add origin "$BLUTTER_REPO"
+git -C "$BLUTTER_DIR" fetch --depth 1 origin "$BLUTTER_COMMIT"
+git -C "$BLUTTER_DIR" checkout -f FETCH_HEAD
+echo "Blutter: $BLUTTER_DIR @ $(git -C "$BLUTTER_DIR" rev-parse HEAD)"
 
 # ═══════════════════════════════════════════════
-# Step 1b: Patch Blutter source for Dart 3.12.x API compat
+# Step 1b / 1b-elf: 已移除
+# 历史补丁（closure.entry_point、ElfHelper null-check）是针对旧 blutter 的
+# workaround；固定 commit 528acbe 已在宿主验证无需补丁即可编译并正常分析。
+# 若未来上游 blutter 又出现兼容问题，需在此按需重新加入（并保持幂等）。
 # ═══════════════════════════════════════════════
-echo ""
-echo "─── [1b] Patching Blutter for Dart SDK API compat ───"
-
-BLUTTER_DARTAPP="$BLUTTER_DIR/blutter/src/DartApp.cpp"
-if grep -q "closure\.entry_point()" "$BLUTTER_DARTAPP" 2>/dev/null; then
-    echo "Patching DartApp.cpp: closure.entry_point() → func.entry_point()"
-    python3 -c "
-import re
-with open('$BLUTTER_DARTAPP', 'r') as f:
-    c = f.read()
-# Dart 3.12.x: Closure has no entry_point(). Access via the underlying Function.
-c, n = re.subn(
-    r'const auto ep_addr = closure\.entry_point\(\) - base\(\);'
-    r'\s+const auto& func = dart::Function::Handle\(closure\.function\(\)\);',
-    r'const auto& func = dart::Function::Handle(closure.function());\n\t\t\tconst auto ep_addr = func.entry_point() - base();',
-    c
-)
-print(f'  DartApp.cpp: {n} occurrences')
-with open('$BLUTTER_DARTAPP', 'w') as f:
-    f.write(c)
-"
-fi
-
-BLUTTER_DARTDUMPER="$BLUTTER_DIR/blutter/src/DartDumper.cpp"
-if grep -q "closure\.entry_point()" "$BLUTTER_DARTDUMPER" 2>/dev/null; then
-    echo "Patching DartDumper.cpp: closure.entry_point() → Function::Handle entry_point()"
-    python3 -c "
-with open('$BLUTTER_DARTDUMPER', 'r') as f:
-    c = f.read()
-# closure.function() returns CompressedObjectPtr, not FunctionPtr handle.
-# Need Function::Handle to access entry_point().
-c = c.replace(
-    'closure.entry_point() - app.base()',
-    'dart::Function::Handle(closure.function()).entry_point() - app.base()'
-)
-c = c.replace(
-    'closure.entry_point()',
-    'dart::Function::Handle(closure.function()).entry_point()'
-)
-print(f'  DartDumper.cpp patched')
-with open('$BLUTTER_DARTDUMPER', 'w') as f:
-    f.write(c)
-"
-fi
-
-# ═══════════════════════════════════════════════
-# Step 1b-elf: Patch ElfHelper.cpp (null-check dynstr/dynsym)
-# 避免 .dynstr 未找到时 nullptr + dynsym->name → SIGSEGV
-# ═══════════════════════════════════════════════
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$SCRIPT_DIR/patch-elfhelper.sh" ]; then
-    bash "$SCRIPT_DIR/patch-elfhelper.sh" "$BLUTTER_DIR"
-fi
 
 # ═══════════════════════════════════════════════
 # Step 1c: Inject NDK toolchain + ICU fixes
