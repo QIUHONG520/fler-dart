@@ -23,6 +23,10 @@ on:
 env:
   NDK_VERSION: ${{ inputs.ndk-version || 'r27' }}
   DART_VERSIONS: '3.11.6 3.12.2 3.12.1 3.12.0 3.11.5 3.11.4 3.10.7 3.10.6 3.10.4 3.9.2 3.9.1 3.8.1 3.8.0'
+  # 单一数据源：矩阵与 version.json 的 dartVersions 都由它驱动（发版新增/调整版本时只改这里）
+  DART_VERSIONS_JSON: '["3.12.2","3.12.1","3.12.0","3.11.6","3.11.5","3.11.4","3.10.7","3.10.6","3.10.4","3.9.2","3.9.1","3.8.1","3.8.0"]'
+  # releaseNotes：发版前更新为本次新增版本 + 更新内容
+  RELEASE_NOTES: 'v0.3.12：新增 Dart 3.11.6（替换此前实验性 3.13.0）；引擎包含 13 个 Dart 版本（3.12.2/3.12.1/3.12.0/3.11.6/3.11.5/3.11.4/3.10.7/3.10.6/3.10.4/3.9.2/3.9.1/3.8.1/3.8.0），含 Capstone/ICU 共享库。'
 
 jobs:
   # ══════════════════════════════════════════════════════════
@@ -92,36 +96,17 @@ jobs:
     name: Build Engine ${{ matrix.dart-version }}
     needs: shared-libs
     runs-on: ubuntu-latest
-    outputs:
-      # 矩阵各 run 的 dart-version 聚合为 JSON 数组，供 release job 生成 version.json
-      dartVersions: ${{ steps.set-version.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
-        dart-version:
-          - '3.12.2'
-          - '3.12.1'
-          - '3.12.0'
-          - '3.11.6'
-          - '3.11.5'
-          - '3.11.4'
-          - '3.10.7'
-          - '3.10.6'
-          - '3.10.4'
-          - '3.9.2'
-          - '3.9.1'
-          - '3.8.1'
-          - '3.8.0'
+        # 由单一数据源 env.DART_VERSIONS_JSON 生成（与 version.json 的 dartVersions 保持一致）
+        dart-version: ${{ fromJSON(env.DART_VERSIONS_JSON) }}
 
     steps:
       - name: Checkout fler-dart
         uses: actions/checkout@v4
         with:
           path: fler-dart
-
-      - name: Set dart version output
-        id: set-version
-        run: echo "version=${{ matrix.dart-version }}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         run: |
@@ -361,13 +346,14 @@ jobs:
         run: |
           TAG="${{ github.ref_name }}"
           SIZE=$(wc -c < release-assets/fler-engines.7z)
-          DART_LIST='${{ toJSON(needs.build-engines.outputs.dartVersions) }}'
+          DART_LIST='${{ env.DART_VERSIONS_JSON }}'
+          RELEASE_NOTES='${{ env.RELEASE_NOTES }}'
           cat > version.json <<EOF
           {
             "version": "$TAG",
             "dartVersions": $DART_LIST,
             "sizeBytes": $SIZE,
-            "releaseNotes": "fler-engines $TAG 引擎包更新（含 Capstone/ICU 共享库）。",
+            "releaseNotes": "$RELEASE_NOTES",
             "downloadUrl": "https://github.com/myfler/fler-dart/releases/download/$TAG/fler-engines.7z",
             "checksumUrl": "https://github.com/myfler/fler-dart/releases/download/$TAG/checksums.txt"
           }
