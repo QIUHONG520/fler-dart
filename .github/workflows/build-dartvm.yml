@@ -99,8 +99,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 由单一数据源 env.DART_VERSIONS_JSON 生成（与 version.json 的 dartVersions 保持一致）
-        dart-version: ${{ fromJSON(env.DART_VERSIONS_JSON) }}
+        # GitHub Actions 的 matrix 表达式无法读取 env 上下文（仅 steps/job env 可用），
+        # 因此这里显式列出版本，需与 env.DART_VERSIONS_JSON（version.json 的 dartVersions）
+        # 保持一致；发版新增/调整版本时两处同步修改。
+        dart-version:
+          - '3.12.2'
+          - '3.12.1'
+          - '3.12.0'
+          - '3.11.6'
+          - '3.11.5'
+          - '3.11.4'
+          - '3.10.7'
+          - '3.10.6'
+          - '3.10.4'
+          - '3.9.2'
+          - '3.9.1'
+          - '3.8.1'
+          - '3.8.0'
 
     steps:
       - name: Checkout fler-dart
