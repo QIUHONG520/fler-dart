@@ -5,13 +5,17 @@
 #       供 fler 的 RizinEngine JNI 使用。产物仅为 Actions artifact（30 天保留），
 #       手动下载后按 Fler 布局解压：
 #         lib/arm64-v8a/librz_*.a    → app/libs/arm64-v8a/
+#         lib/arm64-v8a/libcapstone.a → app/libs/arm64-v8a/
 #         include/rizin/...          → app/src/main/cpp/include/rizin/
+#         include/capstone/...       → app/src/main/cpp/include/capstone/
 #
-# 关键决策（对应 rizin-integration-plan.md §9 方案 A）：
+# 关键决策（对应 rizin-integration-plan.md §9 方案 A 的静态化演进）：
 #   - -Duse_sys_capstone=enabled：Rizin 的 .a 不含 Capstone 代码，cs_open 等符号
-#     为 undefined，运行时复用 fler 引擎包的 libcapstone.so（零体积增量、LGPL 合规）
+#     为 undefined，链接期由 fler 自带 libcapstone.a 静态解析（不再依赖引擎包
+#     的 libcapstone.so，SO 编辑器零引擎依赖）
 #   - 因此必须先在交叉工具链下构建 system capstone（头文件 + aarch64 静态库），
-#     并通过自定义 aarch64-pkg-config wrapper 暴露给 meson
+#     通过自定义 aarch64-pkg-config wrapper 暴露给 meson，并随包一并产出
+#     libcapstone.a + include/capstone 供 fler 静态链接
 #   - capstone-mode=bundled 时退化为上游原版 recipe（capstone 内嵌 = 方案 B）
 #
 # 参照：rizinorg/rizin .github/workflows/ci.yml 的 build-android job
@@ -38,7 +42,7 @@ on:
       capstone-version:
         description: 'sys 模式下使用的 Capstone tag（头文件 + aarch64 静态库）'
         required: false
-        default: '5.0.3'
+        default: '5.0.9'
         type: string
       ndk-version:
         description: 'Android NDK version'
@@ -50,7 +54,7 @@ env:
   NDK_VERSION: ${{ inputs.ndk-version || 'r27' }}
   RIZIN_VERSION: ${{ inputs.rizin-version || 'v0.9.1' }}
   CAPSTONE_MODE: ${{ inputs.capstone-mode || 'sys' }}
-  CAPSTONE_VERSION: ${{ inputs.capstone-version || '5.0.3' }}
+  CAPSTONE_VERSION: ${{ inputs.capstone-version || '5.0.9' }}
   CACHE_ROOT: /tmp/fler-dart-cache/rizin
 
 jobs:
@@ -93,7 +97,7 @@ jobs:
             ${{ env.CACHE_ROOT }}/capstone-src
             ${{ env.CACHE_ROOT }}/capstone-build
             ${{ env.CACHE_ROOT }}/capstone-stage
-          key: capstone-${{ env.CAPSTONE_VERSION }}-${{ env.NDK_VERSION }}-static-v1
+          key: capstone-${{ env.CAPSTONE_VERSION }}-${{ env.NDK_VERSION }}-static-v2
 
       - name: Build system capstone (aarch64 static)
         if: env.CAPSTONE_MODE == 'sys' && steps.cache-capstone.outputs.cache-hit != 'true'
@@ -132,7 +136,10 @@ jobs:
           cmake --build "$CAP_BUILD" -j2
           cmake --install "$CAP_BUILD"
 
-          # 生成 capstone.pc（绝对路径指向宿主 staging；sysroot 前缀在 wrapper 中关闭）
+          # 生成 capstone.pc（绝对路径指向宿主 staging；sysroot 前缀在 wrapper 中关闭）。
+          # Cflags 需同时给 ${includedir} 和 ${includedir}/capstone：Rizin 的 ppc_il.c
+          # 同时用 "capstone.h"（裸名，经 -I.../include/capstone 命中）和
+          # <capstone/ppc.h>（前缀名，经 -I.../include 命中），缺一即编译失败。
           mkdir -p "$CAP_STAGE/lib/pkgconfig" "$CAP_STAGE/bin"
           cat > "$CAP_STAGE/lib/pkgconfig/capstone.pc" <<EOF
           prefix=$CAP_STAGE
@@ -144,7 +151,7 @@ jobs:
           Description: Capstone disassembly engine
           Version: $CAPSTONE_VERSION
           Libs: -L\${libdir} -lcapstone
-          Cflags: -I\${includedir}
+          Cflags: -I\${includedir} -I\${includedir}/capstone
           EOF
 
           # 交叉编译下 meson 会设置 PKG_CONFIG_SYSROOT_DIR，导致宿主绝对路径被
@@ -270,7 +277,7 @@ jobs:
           if [ "$CAPSTONE_MODE" = "sys" ]; then
             echo "=== capstone symbols in librz_arch.a (expect undefined ' U cs_open') ==="
             if nm "$LIBDIR"/librz_arch.a 2>/dev/null | grep -q ' U cs_open'; then
-              echo "OK: cs_open is undefined (plan A: capstone NOT embedded)"
+              echo "OK: cs_open is undefined (capstone NOT embedded; resolved at link time by libcapstone.a)"
             else
               echo "WARNING: cs_open not found as undefined; capstone may be embedded or not referenced"
             fi
@@ -284,10 +291,20 @@ jobs:
           PREFIX="$CACHE_ROOT/rizin-install"
           PKG="$CACHE_ROOT/package"
           rm -rf "$PKG"
-          mkdir -p "$PKG/lib/arm64-v8a" "$PKG/include/rizin"
+          mkdir -p "$PKG/lib/arm64-v8a" "$PKG/include/rizin" "$PKG/include/capstone"
 
           cp "$PREFIX"/lib/librz_*.a "$PKG/lib/arm64-v8a/"
           cp -r "$PREFIX"/include/librz/* "$PKG/include/rizin/"
+
+          if [ "$CAPSTONE_MODE" = "sys" ]; then
+            # fler 静态链接所需：capstone 静态库 + 头文件（Rizin 的 .a 中 cs_* 为
+            # undefined，链接期由此 libcapstone.a 解析，SO 编辑器无需引擎包）
+            cp "$CACHE_ROOT/capstone-stage/lib/libcapstone.a" "$PKG/lib/arm64-v8a/"
+            cp -r "$CACHE_ROOT/capstone-stage/include/capstone/"* "$PKG/include/capstone/"
+            if [ -f "$CACHE_ROOT/capstone-stage/include/platform.h" ]; then
+              cp "$CACHE_ROOT/capstone-stage/include/platform.h" "$PKG/include/capstone/"
+            fi
+          fi
 
           cat > "$PKG/README.txt" <<EOF
           Rizin static libs for fler (arm64-v8a)
@@ -296,26 +313,28 @@ jobs:
           Build date    : $(date -u +%Y-%m-%dT%H:%M:%SZ)
 
           Layout (matches fler project):
-            lib/arm64-v8a/librz_*.a   -> app/libs/arm64-v8a/
-            include/rizin/...          -> app/src/main/cpp/include/rizin/
+            lib/arm64-v8a/librz_*.a     -> app/libs/arm64-v8a/
+            lib/arm64-v8a/libcapstone.a -> app/libs/arm64-v8a/
+            include/rizin/...           -> app/src/main/cpp/include/rizin/
+            include/capstone/...        -> app/src/main/cpp/include/capstone/
 
-          Capstone symbols are undefined in these archives (plan A): at runtime they
-          are resolved from fler's engine-pack libcapstone.so, which must be loaded
-          BEFORE Rizin calls cs_open (see EngineLoader.ensureSharedLibsLoaded).
+          Capstone symbols are undefined in the rizin archives (sys mode): they are
+          resolved at LINK time by libcapstone.a bundled alongside. fler statically
+          links both into fler_jni.so, so the SO editor works WITHOUT the engine pack.
           EOF
 
           echo "=== package contents ==="
           find "$PKG" -type f | sort
 
           cd "$CACHE_ROOT"
-          tar czf "rizin-static-$RIZIN_VERSION-arm64-v8a.tar.gz" package
-          ls -lh "rizin-static-$RIZIN_VERSION-arm64-v8a.tar.gz"
+          tar czf "rizin-static-$RIZIN_VERSION-capstone-$CAPSTONE_VERSION-$CAPSTONE_MODE-arm64-v8a.tar.gz" package
+          ls -lh "rizin-static-$RIZIN_VERSION-capstone-$CAPSTONE_VERSION-$CAPSTONE_MODE-arm64-v8a.tar.gz"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rizin-static-${{ env.RIZIN_VERSION }}-arm64-v8a
+          name: rizin-static-${{ env.RIZIN_VERSION }}-capstone-${{ env.CAPSTONE_VERSION }}-${{ env.CAPSTONE_MODE }}-arm64-v8a
           path: |
-            ${{ env.CACHE_ROOT }}/rizin-static-${{ env.RIZIN_VERSION }}-arm64-v8a.tar.gz
+            ${{ env.CACHE_ROOT }}/rizin-static-${{ env.RIZIN_VERSION }}-capstone-${{ env.CAPSTONE_VERSION }}-${{ env.CAPSTONE_MODE }}-arm64-v8a.tar.gz
           retention-days: 30
           if-no-files-found: error

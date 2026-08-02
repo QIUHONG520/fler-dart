@@ -2,18 +2,21 @@
 # ─── Build dartvm.so for Android ARM64 ───
 # Part of fler-dart: standalone dartvm.so build system for Fler.
 #
-# Pipeline (v3 — dynamic linking):
+# Pipeline (v4 — static capstone):
 #   1. Clone Blutter (provides dartvm_fetch_build.py + C++ source)
 #   2. Patch Blutter's CMake template for NDK ARM64 cross-compile
 #   3. dartvm_fetch_build.py: sparse-checkout Dart SDK → CMake → ARM64 .a
-#   4. Cross-compile Capstone as SHARED lib (libcapstone.so) for ARM64
+#   4. Cross-compile Capstone as STATIC lib (libcapstone.a) for ARM64
 #   5. Compile dartvm.so (Blutter C++ + blutter_entry.cpp + SQLite)
-#      - Dynamically links: libcapstone.so, libicuuc.so, libicudata.so
+#      - Statically links Capstone; dynamically links libicuuc.so, libicudata.so
 #      - Uses $ORIGIN rpath for runtime shared lib resolution
 #   6. Strip → output/dartvm_<version>_android_arm64.so
 #
+# 说明：默认静态 capstone（USE_SHARED_CAPSTONE=OFF），dartvm.so 自带 Capstone，
+# 引擎包不再产出 libcapstone.so；capstone 已静态链接进 fler APK（SO 编辑器反汇编
+# 零引擎依赖）。如需旧的动态模式用 --dynamic-capstone。
+#
 # Shared libraries (built once, reused across all Dart versions):
-#   libcapstone.so   — Capstone disassembly engine
 #   libicuuc.so      — ICU Unicode library
 #   libicudata.so    — ICU data tables
 #   libc++_shared.so — NDK C++ standard library
@@ -37,7 +40,9 @@ BLUTTER_REPO="https://github.com/worawit/blutter.git"
 # （详见 dev-progress 引擎根因排查）。不随上游漂移，保证引擎与宿主行为一致。
 # 该 commit 无需任何 fler-dart 补丁（Step 1b / patch-elfhelper 已移除）。
 BLUTTER_COMMIT="528acbe83ba35a3a53fb97b231cb5f968c7068d1"
-USE_SHARED_CAPSTONE="ON"   # ON = dynamic linking (default v3), OFF = static (legacy)
+# 默认静态 capstone：dartvm.so 自带 Capstone，引擎包不再产 libcapstone.so
+# （capstone 已静态进 fler APK）。--dynamic-capstone 可切回旧动态模式。
+USE_SHARED_CAPSTONE="OFF"
 BUILD_SHARED_LIBS_ONLY="0"
 PREBUILT_SHARED_LIBS_DIR=""
 
@@ -95,9 +100,15 @@ if [ "$BUILD_SHARED_LIBS_ONLY" = "1" ]; then
     echo " Output:     $SHARED_LIBS_OUT"
     echo "════════════════════════════════════════════"
 
-    # 1. Build Capstone shared lib
+    # 1. Build Capstone (shared lib in dynamic mode; static lib in static mode —
+    #    static 模式下 capstone 静态链接进 dartvm.so，引擎包不再需要 libcapstone.so，
+    #    但需产出 libcapstone.a 供各版本 dartvm.so 链接复用)
     echo ""
-    echo "─── [1/4] Building Capstone shared lib (ARM64) ───"
+    if [ "$USE_SHARED_CAPSTONE" = "ON" ]; then
+        echo "─── [1/4] Building Capstone shared lib (ARM64) ───"
+    else
+        echo "─── [1/4] Building Capstone static lib (ARM64) ───"
+    fi
     CAPSTONE_SRC="$BUILD_ROOT/capstone-src"
     if [ ! -d "$CAPSTONE_SRC" ]; then
         mkdir -p "$CAPSTONE_SRC"
@@ -107,20 +118,37 @@ if [ "$BUILD_SHARED_LIBS_ONLY" = "1" ]; then
     fi
     mkdir -p "$CAPSTONE_BUILD_DIR"
     cd "$CAPSTONE_BUILD_DIR"
-    cmake -G Ninja \
-        -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DANDROID_ABI=arm64-v8a \
-        -DANDROID_PLATFORM=android-24 \
-        -DANDROID_STL=c++_shared \
-        -DBUILD_SHARED_LIBS=ON \
-        -DBUILD_STATIC_LIBS=OFF \
-        -DCAPSTONE_BUILD_TESTS=OFF \
-        -DCAPSTONE_BUILD_CSTOOL=OFF \
-        -DCAPSTONE_BUILD_CSTEST=OFF \
-        "$CAPSTONE_SRC"
-    cmake --build . -j "$JOBS"
-    cp "$CAPSTONE_BUILD_DIR/libcapstone.so" "$SHARED_LIBS_OUT/"
+    if [ "$USE_SHARED_CAPSTONE" = "ON" ]; then
+        cmake -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DANDROID_STL=c++_shared \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_STATIC_LIBS=OFF \
+            -DCAPSTONE_BUILD_TESTS=OFF \
+            -DCAPSTONE_BUILD_CSTOOL=OFF \
+            -DCAPSTONE_BUILD_CSTEST=OFF \
+            "$CAPSTONE_SRC"
+        cmake --build . -j "$JOBS"
+        cp "$CAPSTONE_BUILD_DIR/libcapstone.so" "$SHARED_LIBS_OUT/"
+    else
+        cmake -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DANDROID_STL=c++_shared \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_STATIC_LIBS=ON \
+            -DCAPSTONE_BUILD_TESTS=OFF \
+            -DCAPSTONE_BUILD_CSTOOL=OFF \
+            -DCAPSTONE_BUILD_CSTEST=OFF \
+            "$CAPSTONE_SRC"
+        cmake --build . -j "$JOBS"
+        cp "$CAPSTONE_BUILD_DIR/libcapstone.a" "$SHARED_LIBS_OUT/"
+    fi
 
     # 2. Copy NDK shared libs
     echo ""
@@ -501,15 +529,25 @@ if [ ! -f "$SQLITE_DIR/sqlite3.c" ]; then
 fi
 
 # ═══════════════════════════════════════════════
-# Step 3: Build Capstone (SHARED lib for dynamic linking)
+# Step 3: Build Capstone (static by default; SHARED lib in dynamic mode)
 # ═══════════════════════════════════════════════
 echo ""
-echo "─── [3/5] Capstone setup (dynamic linking: $USE_SHARED_CAPSTONE) ───"
+echo "─── [3/5] Capstone setup (mode: $USE_SHARED_CAPSTONE) ───"
 
-# If pre-built shared libs are provided, skip Capstone build
-if [ -n "$PREBUILT_SHARED_LIBS_DIR" ] && [ -f "$PREBUILT_SHARED_LIBS_DIR/libcapstone.so" ]; then
-    echo "  Using pre-built shared libs from: $PREBUILT_SHARED_LIBS_DIR"
-    CAPSTONE_LIB="$PREBUILT_SHARED_LIBS_DIR/libcapstone.so"
+# Pre-built capstone from shared-libs stage: static mode uses libcapstone.a,
+# dynamic mode uses libcapstone.so. Skip source build when present.
+PREBUILT_CAP=""
+if [ -n "$PREBUILT_SHARED_LIBS_DIR" ]; then
+    if [ "$USE_SHARED_CAPSTONE" = "ON" ] && [ -f "$PREBUILT_SHARED_LIBS_DIR/libcapstone.so" ]; then
+        PREBUILT_CAP="$PREBUILT_SHARED_LIBS_DIR/libcapstone.so"
+    elif [ "$USE_SHARED_CAPSTONE" = "OFF" ] && [ -f "$PREBUILT_SHARED_LIBS_DIR/libcapstone.a" ]; then
+        PREBUILT_CAP="$PREBUILT_SHARED_LIBS_DIR/libcapstone.a"
+    fi
+fi
+
+if [ -n "$PREBUILT_CAP" ]; then
+    echo "  Using pre-built Capstone from: $PREBUILT_CAP"
+    CAPSTONE_LIB="$PREBUILT_CAP"
 
     # Capstone headers: download source for headers only (fast, no compilation)
     CAPSTONE_SRC="$BUILD_ROOT/capstone-src"
@@ -638,16 +676,17 @@ mkdir -p "$OUTPUT_DIR"
 cp "$DARTVM_SO_BUILD_DIR/libdartvm.so" "$OUTPUT_FILE"
 
 # Copy shared libs next to engine (runtime resolution via $ORIGIN)
-if [ -n "$PREBUILT_SHARED_LIBS_DIR" ] && [ -f "$PREBUILT_SHARED_LIBS_DIR/libcapstone.so" ]; then
+# 必要共享库（libc++_shared/ICU）在静态/动态模式下都随引擎包；
+# libcapstone.so 仅动态模式产出（静态模式 dartvm.so 已自带 Capstone）。
+if [ -n "$PREBUILT_SHARED_LIBS_DIR" ]; then
     echo "  Copying pre-built shared libs to output..."
-    cp "$PREBUILT_SHARED_LIBS_DIR/libcapstone.so" "$OUTPUT_DIR/" 2>/dev/null || true
     cp "$PREBUILT_SHARED_LIBS_DIR/libc++_shared.so" "$OUTPUT_DIR/" 2>/dev/null || true
     cp "$PREBUILT_SHARED_LIBS_DIR/libicuuc.so" "$OUTPUT_DIR/" 2>/dev/null || true
     cp "$PREBUILT_SHARED_LIBS_DIR/libicudata.so" "$OUTPUT_DIR/" 2>/dev/null || true
-elif [ "$USE_SHARED_CAPSTONE" = "ON" ]; then
-    if [ -f "$SHARED_LIBS_DIR/libcapstone.so" ]; then
-        cp "$SHARED_LIBS_DIR/libcapstone.so" "$OUTPUT_DIR/"
+    if [ "$USE_SHARED_CAPSTONE" = "ON" ]; then
+        cp "$PREBUILT_SHARED_LIBS_DIR/libcapstone.so" "$OUTPUT_DIR/" 2>/dev/null || true
     fi
+else
     if [ -f "$SHARED_LIBS_DIR/libc++_shared.so" ]; then
         cp "$SHARED_LIBS_DIR/libc++_shared.so" "$OUTPUT_DIR/"
     fi
@@ -656,6 +695,9 @@ elif [ "$USE_SHARED_CAPSTONE" = "ON" ]; then
     fi
     if [ -f "$ICU_LIB_DIR/libicudata.so" ]; then
         cp "$ICU_LIB_DIR/libicudata.so" "$OUTPUT_DIR/"
+    fi
+    if [ "$USE_SHARED_CAPSTONE" = "ON" ] && [ -f "$SHARED_LIBS_DIR/libcapstone.so" ]; then
+        cp "$SHARED_LIBS_DIR/libcapstone.so" "$OUTPUT_DIR/"
     fi
 fi
 

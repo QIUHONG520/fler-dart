@@ -1,4 +1,4 @@
-name: Build dartvm (v3 — Dynamic Linking)
+name: Build dartvm (v4 — Static Capstone)
 
 on:
   push:
@@ -26,14 +26,14 @@ env:
   # 单一数据源：矩阵与 version.json 的 dartVersions 都由它驱动（发版新增/调整版本时只改这里）
   DART_VERSIONS_JSON: '["3.12.2","3.12.1","3.12.0","3.11.6","3.11.5","3.11.4","3.10.7","3.10.6","3.10.4","3.9.2","3.9.1","3.8.1","3.8.0"]'
   # releaseNotes：发版前更新为本次新增版本 + 更新内容
-  RELEASE_NOTES: 'v0.3.13：Capstone 升级至 5.0.9（与 Rizin 集成方案 A 的运行时版本对齐）；引擎包含 13 个 Dart 版本（3.12.2/3.12.1/3.12.0/3.11.6/3.11.5/3.11.4/3.10.7/3.10.6/3.10.4/3.9.2/3.9.1/3.8.1/3.8.0），含 Capstone/ICU 共享库。'
+  RELEASE_NOTES: 'v0.4.0：引擎改为静态 Capstone（dartvm.so 自带 Capstone，引擎包不再含 libcapstone.so）；Capstone 静态链接进 fler APK，SO 编辑器反汇编零引擎依赖；引擎含 13 个 Dart 版本（3.12.2/3.12.1/3.12.0/3.11.6/3.11.5/3.11.4/3.10.7/3.10.6/3.10.4/3.9.2/3.9.1/3.8.1/3.8.0），含 ICU 共享库。'
 
 jobs:
   # ══════════════════════════════════════════════════════════
   # STAGE 1: Build shared libraries (once, reused across versions)
   # ══════════════════════════════════════════════════════════
   shared-libs:
-    name: Build Shared Libraries (capstone + ICU + c++_shared)
+    name: Build Shared Libraries (capstone.a + ICU + c++_shared)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout fler-dart
@@ -63,7 +63,7 @@ jobs:
             /tmp/fler-dart-cache/shared_libs/icu-src
             /tmp/fler-dart-cache/shared_libs/icu-host-build
             /tmp/fler-dart-cache/shared_libs/icu-cross-build
-          key: shared-libs-${{ env.NDK_VERSION }}-icu73-2-capstone5-0-9-v1
+          key: shared-libs-${{ env.NDK_VERSION }}-icu73-2-capstone5-0-9-static-v2
 
       - name: Build shared libraries
         run: |
@@ -78,6 +78,10 @@ jobs:
           echo "=== Shared libraries ==="
           ls -lh output/shared_libs/
           echo ""
+          for f in output/shared_libs/libcapstone.*; do
+            [ -f "$f" ] && file "$f"
+          done
+          echo ""
           for f in output/shared_libs/*.so; do
             [ -f "$f" ] && file "$f"
           done
@@ -86,7 +90,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: shared_libs
-          path: output/shared_libs/*.so
+          path: |
+            output/shared_libs/*.so
+            output/shared_libs/*.a
           retention-days: 30
 
   # ══════════════════════════════════════════════════════════
@@ -148,7 +154,7 @@ jobs:
           path: |
             /tmp/fler-dart-cache/dartvm_${{ matrix.dart-version }}/blutter
             /tmp/fler-dart-cache/dartvm_${{ matrix.dart-version }}/blutter/packages
-          key: dartvm-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v15-precompiled-dynamic
+          key: dartvm-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v16-static-capstone
           restore-keys: |
             dartvm-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v14
 
@@ -156,7 +162,7 @@ jobs:
         run: bash fler-dart/scripts/patch-tmpdir.sh
 
 
-      - name: Build dartvm.so (dynamic linking)
+      - name: Build dartvm.so (static capstone)
         run: |
           mkdir -p output
           bash fler-dart/scripts/build-dartvm.sh \
@@ -320,11 +326,11 @@ jobs:
             | Category | Files |
             |----------|-------|
             | **Engines** | `dartvm_3.12.2.so`, `dartvm_3.12.1.so`, `dartvm_3.12.0.so`, `dartvm_3.11.6.so`, `dartvm_3.11.5.so`, `dartvm_3.11.4.so`, `dartvm_3.10.7.so`, `dartvm_3.10.6.so`, `dartvm_3.10.4.so`, `dartvm_3.9.2.so`, `dartvm_3.9.1.so`, `dartvm_3.8.1.so`, `dartvm_3.8.0.so` |
-            | **Shared Libs** | `libcapstone.so`, `libicuuc.so`, `libicudata.so`, `libc++_shared.so` |
+            | **Shared Libs** | `libicuuc.so`, `libicudata.so`, `libc++_shared.so` |
 
             ### Architecture
             - **ABI**: arm64-v8a (Android ARM64)
-            - **Dynamic Linking**: Capstone/ICU/c++_shared linked dynamically, shared across all versions
+            - **Static Capstone**: Capstone statically linked into each `dartvm_*.so`; ICU/c++_shared linked dynamically, shared across all versions
             - **rpath**: `$ORIGIN` for runtime shared lib resolution
 
             ### Usage
@@ -335,7 +341,6 @@ jobs:
                ```
                Fler/cache/engines/
                ├── lib/
-               │   ├── libcapstone.so
                │   ├── libicuuc.so
                │   ├── libicudata.so
                │   └── libc++_shared.so
