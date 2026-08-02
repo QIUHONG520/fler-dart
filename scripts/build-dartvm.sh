@@ -101,7 +101,7 @@ if [ "$BUILD_SHARED_LIBS_ONLY" = "1" ]; then
     CAPSTONE_SRC="$BUILD_ROOT/capstone-src"
     if [ ! -d "$CAPSTONE_SRC" ]; then
         mkdir -p "$CAPSTONE_SRC"
-        curl -sL "https://github.com/capstone-engine/capstone/archive/refs/tags/4.0.2.tar.gz" \
+        curl -sL "https://github.com/capstone-engine/capstone/archive/refs/tags/5.0.9.tar.gz" \
             -o "$BUILD_ROOT/capstone.tar.gz"
         tar xzf "$BUILD_ROOT/capstone.tar.gz" -C "$CAPSTONE_SRC" --strip-components=1
     fi
@@ -113,9 +113,11 @@ if [ "$BUILD_SHARED_LIBS_ONLY" = "1" ]; then
         -DANDROID_ABI=arm64-v8a \
         -DANDROID_PLATFORM=android-24 \
         -DANDROID_STL=c++_shared \
-        -DCAPSTONE_BUILD_SHARED=ON \
-        -DCAPSTONE_BUILD_STATIC=OFF \
-        -DCAPSTONE_ARCHITECTURES="aarch64" \
+        -DBUILD_SHARED_LIBS=ON \
+        -DBUILD_STATIC_LIBS=OFF \
+        -DCAPSTONE_BUILD_TESTS=OFF \
+        -DCAPSTONE_BUILD_CSTOOL=OFF \
+        -DCAPSTONE_BUILD_CSTEST=OFF \
         "$CAPSTONE_SRC"
     cmake --build . -j "$JOBS"
     cp "$CAPSTONE_BUILD_DIR/libcapstone.so" "$SHARED_LIBS_OUT/"
@@ -513,7 +515,7 @@ if [ -n "$PREBUILT_SHARED_LIBS_DIR" ] && [ -f "$PREBUILT_SHARED_LIBS_DIR/libcaps
     CAPSTONE_SRC="$BUILD_ROOT/capstone-src"
     if [ ! -d "$CAPSTONE_SRC" ]; then
         echo "  Fetching Capstone headers..."
-        curl -sL "https://github.com/capstone-engine/capstone/archive/refs/tags/4.0.2.tar.gz" \
+        curl -sL "https://github.com/capstone-engine/capstone/archive/refs/tags/5.0.9.tar.gz" \
             -o "$BUILD_ROOT/capstone.tar.gz"
         mkdir -p "$CAPSTONE_SRC"
         tar xzf "$BUILD_ROOT/capstone.tar.gz" -C "$CAPSTONE_SRC" --strip-components=1
@@ -524,9 +526,9 @@ else
     echo "  Building Capstone from source..."
     CAPSTONE_SRC="$BUILD_ROOT/capstone-src"
     if [ ! -d "$CAPSTONE_SRC" ]; then
-        echo "Downloading Capstone 4.0.2..."
+        echo "Downloading Capstone 5.0.9..."
         mkdir -p "$CAPSTONE_SRC"
-        curl -sL "https://github.com/capstone-engine/capstone/archive/refs/tags/4.0.2.tar.gz" \
+        curl -sL "https://github.com/capstone-engine/capstone/archive/refs/tags/5.0.9.tar.gz" \
             -o "$BUILD_ROOT/capstone.tar.gz"
         tar xzf "$BUILD_ROOT/capstone.tar.gz" -C "$CAPSTONE_SRC" --strip-components=1
     fi
@@ -541,9 +543,11 @@ else
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-24 \
             -DANDROID_STL=c++_shared \
-            -DCAPSTONE_BUILD_SHARED=ON \
-            -DCAPSTONE_BUILD_STATIC=OFF \
-            -DCAPSTONE_ARCHITECTURES="aarch64" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_STATIC_LIBS=OFF \
+            -DCAPSTONE_BUILD_TESTS=OFF \
+            -DCAPSTONE_BUILD_CSTOOL=OFF \
+            -DCAPSTONE_BUILD_CSTEST=OFF \
             "$CAPSTONE_SRC"
         cmake --build . -j "$JOBS"
         CAPSTONE_LIB=$(find "$CAPSTONE_BUILD_DIR" -name "libcapstone.so" 2>/dev/null | head -1 || true)
@@ -557,9 +561,11 @@ else
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-24 \
             -DANDROID_STL=c++_static \
-            -DCAPSTONE_BUILD_SHARED=OFF \
-            -DCAPSTONE_BUILD_STATIC=ON \
-            -DCAPSTONE_ARCHITECTURES="aarch64" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_STATIC_LIBS=ON \
+            -DCAPSTONE_BUILD_TESTS=OFF \
+            -DCAPSTONE_BUILD_CSTOOL=OFF \
+            -DCAPSTONE_BUILD_CSTEST=OFF \
             "$CAPSTONE_SRC"
         cmake --build . -j "$JOBS"
         CAPSTONE_LIB=$(find "$CAPSTONE_BUILD_DIR" -name "libcapstone.a" 2>/dev/null | head -1 || true)

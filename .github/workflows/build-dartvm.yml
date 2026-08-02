@@ -26,7 +26,7 @@ env:
   # 单一数据源：矩阵与 version.json 的 dartVersions 都由它驱动（发版新增/调整版本时只改这里）
   DART_VERSIONS_JSON: '["3.12.2","3.12.1","3.12.0","3.11.6","3.11.5","3.11.4","3.10.7","3.10.6","3.10.4","3.9.2","3.9.1","3.8.1","3.8.0"]'
   # releaseNotes：发版前更新为本次新增版本 + 更新内容
-  RELEASE_NOTES: 'v0.3.12：新增 Dart 3.11.6（替换此前实验性 3.13.0）；引擎包含 13 个 Dart 版本（3.12.2/3.12.1/3.12.0/3.11.6/3.11.5/3.11.4/3.10.7/3.10.6/3.10.4/3.9.2/3.9.1/3.8.1/3.8.0），含 Capstone/ICU 共享库。'
+  RELEASE_NOTES: 'v0.3.13：Capstone 升级至 5.0.9（与 Rizin 集成方案 A 的运行时版本对齐）；引擎包含 13 个 Dart 版本（3.12.2/3.12.1/3.12.0/3.11.6/3.11.5/3.11.4/3.10.7/3.10.6/3.10.4/3.9.2/3.9.1/3.8.1/3.8.0），含 Capstone/ICU 共享库。'
 
 jobs:
   # ══════════════════════════════════════════════════════════
@@ -63,7 +63,7 @@ jobs:
             /tmp/fler-dart-cache/shared_libs/icu-src
             /tmp/fler-dart-cache/shared_libs/icu-host-build
             /tmp/fler-dart-cache/shared_libs/icu-cross-build
-          key: shared-libs-${{ env.NDK_VERSION }}-icu73-2-capstone4-0-2-v1
+          key: shared-libs-${{ env.NDK_VERSION }}-icu73-2-capstone5-0-9-v1
 
       - name: Build shared libraries
         run: |
