@@ -1,0 +1,321 @@
+# =============================================================================
+# Build Rizin static libs (arm64-v8a) — fler RizinEngine integration
+#
+# 用途：用 Android NDK 交叉编译 Rizin（默认 v0.9.1）静态库 librz_*.a + 头文件，
+#       供 fler 的 RizinEngine JNI 使用。产物仅为 Actions artifact（30 天保留），
+#       手动下载后按 Fler 布局解压：
+#         lib/arm64-v8a/librz_*.a    → app/libs/arm64-v8a/
+#         include/rizin/...          → app/src/main/cpp/include/rizin/
+#
+# 关键决策（对应 rizin-integration-plan.md §9 方案 A）：
+#   - -Duse_sys_capstone=enabled：Rizin 的 .a 不含 Capstone 代码，cs_open 等符号
+#     为 undefined，运行时复用 fler 引擎包的 libcapstone.so（零体积增量、LGPL 合规）
+#   - 因此必须先在交叉工具链下构建 system capstone（头文件 + aarch64 静态库），
+#     并通过自定义 aarch64-pkg-config wrapper 暴露给 meson
+#   - capstone-mode=bundled 时退化为上游原版 recipe（capstone 内嵌 = 方案 B）
+#
+# 参照：rizinorg/rizin .github/workflows/ci.yml 的 build-android job
+#       （官方 meson-android-aarch64.ini + --default-library static -Dstatic_runtime=true）
+# =============================================================================
+name: Build Rizin static libs (arm64-v8a)
+
+on:
+  workflow_dispatch:
+    inputs:
+      rizin-version:
+        description: 'Rizin git tag/commit to build'
+        required: false
+        default: 'v0.9.1'
+        type: string
+      capstone-mode:
+        description: 'sys = 动态链接 libcapstone.so (方案 A, 推荐) | bundled = 内嵌 capstone (方案 B)'
+        required: false
+        default: 'sys'
+        type: choice
+        options:
+          - sys
+          - bundled
+      capstone-version:
+        description: 'sys 模式下使用的 Capstone tag（头文件 + aarch64 静态库）'
+        required: false
+        default: '5.0.3'
+        type: string
+      ndk-version:
+        description: 'Android NDK version'
+        required: false
+        default: 'r27'
+        type: string
+
+env:
+  NDK_VERSION: ${{ inputs.ndk-version || 'r27' }}
+  RIZIN_VERSION: ${{ inputs.rizin-version || 'v0.9.1' }}
+  CAPSTONE_MODE: ${{ inputs.capstone-mode || 'sys' }}
+  CAPSTONE_VERSION: ${{ inputs.capstone-version || '5.0.3' }}
+  CACHE_ROOT: /tmp/fler-dart-cache/rizin
+
+jobs:
+  build-rizin-static:
+    name: Build Rizin static libs (arm64-v8a)
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout fler-dart
+        uses: actions/checkout@v4
+        with:
+          path: fler-dart
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build python3 python3-pip python3-setuptools python3-wheel \
+            pkg-config curl git file binutils
+
+      - name: Install meson
+        run: |
+          pip3 install --user meson
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Setup Android NDK ${{ env.NDK_VERSION }}
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+
+      # ─────────────────────────────────────────────────────────────
+      # Stage 1: Build system Capstone (aarch64 static) — sys mode only
+      # ─────────────────────────────────────────────────────────────
+      - name: Cache capstone (sys mode)
+        if: env.CAPSTONE_MODE == 'sys'
+        id: cache-capstone
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.CACHE_ROOT }}/capstone-src
+            ${{ env.CACHE_ROOT }}/capstone-build
+            ${{ env.CACHE_ROOT }}/capstone-stage
+          key: capstone-${{ env.CAPSTONE_VERSION }}-${{ env.NDK_VERSION }}-static-v1
+
+      - name: Build system capstone (aarch64 static)
+        if: env.CAPSTONE_MODE == 'sys' && steps.cache-capstone.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          CAP_SRC="$CACHE_ROOT/capstone-src"
+          CAP_BUILD="$CACHE_ROOT/capstone-build"
+          CAP_STAGE="$CACHE_ROOT/capstone-stage"
+          mkdir -p "$CAP_SRC" "$CAP_BUILD" "$CAP_STAGE"
+
+          if [ ! -f "$CAP_SRC/CMakeLists.txt" ]; then
+            curl -sL "https://github.com/capstone-engine/capstone/archive/refs/tags/$CAPSTONE_VERSION.tar.gz" \
+              -o /tmp/capstone.tar.gz
+            tar xzf /tmp/capstone.tar.gz -C "$CAP_SRC" --strip-components=1
+          fi
+
+          # Capstone 5.x 的 CMake 选项与 4.x 不同：用 BUILD_SHARED_LIBS=OFF 产出
+          # 静态库，CAPSTONE_BUILD_TESTS/CSTOOL 默认 ON 需关闭（避免编译宿主可执行文件）。
+          # 5.x 的 capstone.h 对全部架构头文件无条件 include，因此 .a 内容不影响
+          # Rizin 编译（Rizin 只需头文件，链接符号保持 undefined）。
+          cmake -G Ninja \
+            -B "$CAP_BUILD" \
+            -S "$CAP_SRC" \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DANDROID_STL=c++_shared \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCAPSTONE_INSTALL=ON \
+            -DCAPSTONE_BUILD_TESTS=OFF \
+            -DCAPSTONE_BUILD_CSTOOL=OFF \
+            -DCAPSTONE_BUILD_CSTEST=OFF \
+            -DCMAKE_INSTALL_PREFIX="$CAP_STAGE" \
+            "$CAP_SRC"
+          cmake --build "$CAP_BUILD" -j2
+          cmake --install "$CAP_BUILD"
+
+          # 生成 capstone.pc（绝对路径指向宿主 staging；sysroot 前缀在 wrapper 中关闭）
+          mkdir -p "$CAP_STAGE/lib/pkgconfig" "$CAP_STAGE/bin"
+          cat > "$CAP_STAGE/lib/pkgconfig/capstone.pc" <<EOF
+          prefix=$CAP_STAGE
+          exec_prefix=\${prefix}
+          libdir=\${prefix}/lib
+          includedir=\${prefix}/include
+
+          Name: capstone
+          Description: Capstone disassembly engine
+          Version: $CAPSTONE_VERSION
+          Libs: -L\${libdir} -lcapstone
+          Cflags: -I\${includedir}
+          EOF
+
+          # 交叉编译下 meson 会设置 PKG_CONFIG_SYSROOT_DIR，导致宿主绝对路径被
+          # 错误加前缀；wrapper 内强制清空，仅保留本 .pc 目录。
+          cat > "$CAP_STAGE/bin/aarch64-pkg-config" <<'EOF2'
+          #!/bin/sh
+          STAGE="$(cd "$(dirname "$0")/.." && pwd)"
+          unset PKG_CONFIG_SYSROOT_DIR
+          unset PKG_CONFIG_PATH
+          export PKG_CONFIG_LIBDIR="$STAGE/lib/pkgconfig"
+          exec pkg-config "$@"
+          EOF2
+          chmod +x "$CAP_STAGE/bin/aarch64-pkg-config"
+
+          echo "=== capstone stage ==="
+          find "$CAP_STAGE" -type f | sort
+          ls -lh "$CAP_STAGE/lib/libcapstone.a"
+
+      # ─────────────────────────────────────────────────────────────
+      # Stage 2: Clone Rizin
+      # ─────────────────────────────────────────────────────────────
+      - name: Cache rizin source
+        id: cache-rizin
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.CACHE_ROOT }}/rizin-src
+          key: rizin-${{ env.RIZIN_VERSION }}-${{ env.NDK_VERSION }}-v1
+
+      - name: Clone Rizin ${{ env.RIZIN_VERSION }}
+        if: steps.cache-rizin.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$RIZIN_VERSION" \
+            https://github.com/rizinorg/rizin.git "$CACHE_ROOT/rizin-src"
+          cd "$CACHE_ROOT/rizin-src"
+          git rev-parse HEAD
+
+      - name: Generate cross file
+        run: |
+          set -euo pipefail
+          NDK_TOOLS="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CROSS_FILE="$CACHE_ROOT/meson-android-aarch64.ini"
+
+          if [ "$CAPSTONE_MODE" = "sys" ]; then
+            PKGCONFIG="$CACHE_ROOT/capstone-stage/bin/aarch64-pkg-config"
+          else
+            PKGCONFIG="false"
+          fi
+
+          # 基于官方 .github/meson-android-aarch64.ini，ld 改为 ld.lld（r27 已移除
+          # GNU ld 包装器），pkgconfig 按模式指向 wrapper 或 false。
+          cat > "$CROSS_FILE" <<EOF
+          [binaries]
+          c       = '$NDK_TOOLS/aarch64-linux-android33-clang'
+          cpp     = '$NDK_TOOLS/aarch64-linux-android33-clang++'
+          ar      = '$NDK_TOOLS/llvm-ar'
+          as      = '$NDK_TOOLS/aarch64-linux-android-as'
+          ranlib  = '$NDK_TOOLS/aarch64-linux-android-ranlib'
+          ld      = '$NDK_TOOLS/ld.lld'
+          strip   = '$NDK_TOOLS/aarch64-linux-android-strip'
+          pkgconfig = '$PKGCONFIG'
+
+          [properties]
+          sys_root = '$ANDROID_NDK_HOME/sysroot'
+
+          [host_machine]
+          system = 'android'
+          cpu_family = 'arm'
+          cpu = 'aarch64'
+          endian = 'little'
+          EOF
+
+          echo "=== cross file ==="
+          cat "$CROSS_FILE"
+
+      - name: Configure with meson
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          cd "$CACHE_ROOT/rizin-src"
+
+          MESON_OPTS=(
+            --buildtype release
+            --default-library static
+            --prefix="$CACHE_ROOT/rizin-install"
+            -Dportable=true
+            -Dstatic_runtime=true
+            -Dcli=disabled
+            -Ddebugger=false
+            -Denable_tests=false
+            -Denable_rz_test=false
+            -Denable_examples=false
+            -Denable_benchmarks=false
+          )
+          if [ "$CAPSTONE_MODE" = "sys" ]; then
+            MESON_OPTS+=(-Duse_sys_capstone=enabled)
+          else
+            MESON_OPTS+=(-Duse_sys_capstone=disabled)
+          fi
+
+          meson setup build "${MESON_OPTS[@]}" \
+            --cross-file "$CACHE_ROOT/meson-android-aarch64.ini"
+
+          echo "=== capstone resolution ==="
+          meson configure build | grep -i capstone || true
+
+      - name: Build and install
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          cd "$CACHE_ROOT/rizin-src"
+          ninja -C build
+          ninja -C build install
+
+      - name: Verify static libs
+        run: |
+          set -euo pipefail
+          LIBDIR="$CACHE_ROOT/rizin-install/lib"
+          echo "=== librz_*.a ==="
+          ls -lh "$LIBDIR"/librz_*.a
+          echo ""
+          echo "=== arch check ==="
+          file "$LIBDIR"/librz_util.a
+          echo ""
+          if [ "$CAPSTONE_MODE" = "sys" ]; then
+            echo "=== capstone symbols in librz_arch.a (expect undefined ' U cs_open') ==="
+            if nm "$LIBDIR"/librz_arch.a 2>/dev/null | grep -q ' U cs_open'; then
+              echo "OK: cs_open is undefined (plan A: capstone NOT embedded)"
+            else
+              echo "WARNING: cs_open not found as undefined; capstone may be embedded or not referenced"
+            fi
+          else
+            echo "(bundled mode: capstone embedded by design)"
+          fi
+
+      - name: Package static libs + headers
+        run: |
+          set -euo pipefail
+          PREFIX="$CACHE_ROOT/rizin-install"
+          PKG="$CACHE_ROOT/package"
+          rm -rf "$PKG"
+          mkdir -p "$PKG/lib/arm64-v8a" "$PKG/include/rizin"
+
+          cp "$PREFIX"/lib/librz_*.a "$PKG/lib/arm64-v8a/"
+          cp -r "$PREFIX"/include/librz/* "$PKG/include/rizin/"
+
+          cat > "$PKG/README.txt" <<EOF
+          Rizin static libs for fler (arm64-v8a)
+          Rizin version : $RIZIN_VERSION
+          Capstone mode : $CAPSTONE_MODE (capstone $CAPSTONE_VERSION)
+          Build date    : $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          Layout (matches fler project):
+            lib/arm64-v8a/librz_*.a   -> app/libs/arm64-v8a/
+            include/rizin/...          -> app/src/main/cpp/include/rizin/
+
+          Capstone symbols are undefined in these archives (plan A): at runtime they
+          are resolved from fler's engine-pack libcapstone.so, which must be loaded
+          BEFORE Rizin calls cs_open (see EngineLoader.ensureSharedLibsLoaded).
+          EOF
+
+          echo "=== package contents ==="
+          find "$PKG" -type f | sort
+
+          cd "$CACHE_ROOT"
+          tar czf "rizin-static-$RIZIN_VERSION-arm64-v8a.tar.gz" package
+          ls -lh "rizin-static-$RIZIN_VERSION-arm64-v8a.tar.gz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rizin-static-${{ env.RIZIN_VERSION }}-arm64-v8a
+          path: |
+            ${{ env.CACHE_ROOT }}/rizin-static-${{ env.RIZIN_VERSION }}-arm64-v8a.tar.gz
+          retention-days: 30
+          if-no-files-found: error
