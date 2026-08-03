@@ -13,9 +13,10 @@
 #   - Unicorn 的 CMake 在 configure 期执行 qemu/configure（sh 脚本）+ create_config
 #     生成 config-host.h；ubuntu runner 自带 sh/pkg-config，无需额外处理
 #     （这也是本地 Windows 无法直接构建、改走 CI 交叉编译的原因）
-#   - 静态构建产物名为 libunicorn-static.a（CMakeLists 对静态库设了
-#     OUTPUT_NAME=unicorn-static，避免与动态库同名冲突），打包时重命名为
-#     libunicorn.a 对齐 fler 的 app/libs/arm64-v8a/ 布局
+#   - 静态构建的完整产物是 bundle_static_library 合并出的 libunicorn.a
+#     （含 unicorn + unicorn-common + aarch64-softmmu 全部对象）；target unicorn
+#     本身只产出薄库 libunicorn-static.a（仅 uc.c/vl.c/cpu.c 三个对象，缺 TCG 核心），
+#     因此必须构建默认目标（含 bundling_target）并取 build 根目录的 libunicorn.a
 # =============================================================================
 name: Build Unicorn static lib (arm64-v8a)
 
@@ -111,7 +112,11 @@ jobs:
             -DUNICORN_ARCH="$UNICORN_ARCH" \
             -DBUILD_SHARED_LIBS=OFF \
             -DUNICORN_BUILD_TESTS=OFF \
-            -DUNICORN_INSTALL=OFF
+            -DUNICORN_INSTALL=OFF \
+            -DCMAKE_C_FLAGS="-Wno-unused-but-set-variable -Wno-unused-variable"
+
+          # 屏蔽的 warning 均来自上游 QEMU 派生代码（memory_ldst.inc.c 的 release_lock、
+          # uc.c 的 begin_pc32），无害且上游自身也不处理；保留其余 warning 不动
 
           # config-host.h 由 qemu/configure + create_config 在 configure 期生成，
           # 缺失即后续编译全挂，这里提前校验
@@ -122,12 +127,21 @@ jobs:
           fi
           echo "config-host.h generated OK"
 
-      - name: Build libunicorn-static.a
+      - name: Build bundled libunicorn.a
         run: |
           set -euo pipefail
-          cmake --build "$CACHE_ROOT/unicorn-build" --target unicorn -j2
-          # 静态库产物名为 libunicorn-static.a（Unicorn CMake 的 OUTPUT_NAME 设置）
-          ls -lh "$CACHE_ROOT/unicorn-build/libunicorn-static.a"
+          # 构建默认目标（含 bundling_target）：bundle_static_library 用 ar -M 把
+          # unicorn 薄库 + unicorn-common + aarch64-softmmu 合并为 build 根目录的
+          # libunicorn.a。若只 --target unicorn 会得到缺 TCG 核心的薄库。
+          cmake --build "$CACHE_ROOT/unicorn-build" -j2
+          ls -lh "$CACHE_ROOT/unicorn-build/libunicorn.a"
+          # 薄库仅 3 个对象（几百 KB）；合并后应含数十个对象、体积 MB 级
+          OBJ_COUNT=$(ar t "$CACHE_ROOT/unicorn-build/libunicorn.a" | wc -l)
+          echo "object count in archive: $OBJ_COUNT"
+          if [ "$OBJ_COUNT" -lt 30 ]; then
+            echo "ERROR: libunicorn.a looks like the thin lib (bundling failed)"
+            exit 1
+          fi
 
       # ─────────────────────────────────────────────────────────────
       # Stage 3: Verify + Package
@@ -135,7 +149,7 @@ jobs:
       - name: Verify static lib
         run: |
           set -euo pipefail
-          LIB="$CACHE_ROOT/unicorn-build/libunicorn-static.a"
+          LIB="$CACHE_ROOT/unicorn-build/libunicorn.a"
           echo "=== arch check (expect aarch64 object) ==="
           file "$LIB"
           echo ""
@@ -147,6 +161,15 @@ jobs:
               echo "ERROR: $sym missing"; exit 1
             fi
           done
+          echo ""
+          echo "=== TCG core check (薄库缺失，合并归档必须有) ==="
+          for sym in tcg_exec cpu_exec; do
+            if nm "$LIB" 2>/dev/null | grep -q " T $sym"; then
+              echo "OK: $sym defined"
+            else
+              echo "ERROR: $sym missing - archive is the thin lib, bundling failed"; exit 1
+            fi
+          done
 
       - name: Package static lib + headers
         run: |
@@ -156,7 +179,7 @@ jobs:
           rm -rf "$PKG"
           mkdir -p "$PKG/lib/arm64-v8a" "$PKG/include/unicorn"
 
-          cp "$CACHE_ROOT/unicorn-build/libunicorn-static.a" "$PKG/lib/arm64-v8a/libunicorn.a"
+          cp "$CACHE_ROOT/unicorn-build/libunicorn.a" "$PKG/lib/arm64-v8a/libunicorn.a"
           cp "$SRC"/include/unicorn/*.h "$PKG/include/unicorn/"
 
           cat > "$PKG/README.txt" <<EOF
