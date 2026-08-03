@@ -1,0 +1,188 @@
+# =============================================================================
+# Build Unicorn static lib (arm64-v8a) — fler UnicornEngine integration
+#
+# 用途：用 Android NDK 交叉编译 Unicorn（默认 2.0.1）静态库 libunicorn.a + 头文件，
+#       供 fler 的 UnicornEngine JNI 使用（unicorn-unidbg-dev-plan.md M0/M1）。
+#       产物仅为 Actions artifact（30 天保留），手动下载后按 Fler 布局解压：
+#         lib/arm64-v8a/libunicorn.a → app/libs/arm64-v8a/
+#         include/unicorn/...        → app/src/main/cpp/include/unicorn/
+#
+# 关键决策：
+#   - UNICORN_ARCH=aarch64：fler 仅 arm64-v8a ABI，只编 aarch64 后端，体积最小
+#   - BUILD_SHARED_LIBS=OFF：静态库，链接进 fler_jni.so，运行时零依赖
+#   - Unicorn 的 CMake 在 configure 期执行 qemu/configure（sh 脚本）+ create_config
+#     生成 config-host.h；ubuntu runner 自带 sh/pkg-config，无需额外处理
+#     （这也是本地 Windows 无法直接构建、改走 CI 交叉编译的原因）
+#   - 产物 libunicorn.a 位于 build 根目录（非 install 布局），直接取用
+# =============================================================================
+name: Build Unicorn static lib (arm64-v8a)
+
+on:
+  workflow_dispatch:
+    inputs:
+      unicorn-version:
+        description: 'Unicorn git tag to build'
+        required: false
+        default: '2.0.1'
+        type: string
+      unicorn-arch:
+        description: 'Unicorn backend architectures (semicolon separated)'
+        required: false
+        default: 'aarch64'
+        type: string
+      android-platform:
+        description: 'Android minimum API level'
+        required: false
+        default: 'android-26'
+        type: string
+      ndk-version:
+        description: 'Android NDK version'
+        required: false
+        default: 'r27'
+        type: string
+
+env:
+  NDK_VERSION: ${{ inputs.ndk-version || 'r27' }}
+  UNICORN_VERSION: ${{ inputs.unicorn-version || '2.0.1' }}
+  UNICORN_ARCH: ${{ inputs.unicorn-arch || 'aarch64' }}
+  ANDROID_PLATFORM: ${{ inputs.android-platform || 'android-26' }}
+  CACHE_ROOT: /tmp/fler-dart-cache/unicorn
+
+jobs:
+  build-unicorn-static:
+    name: Build Unicorn static lib (arm64-v8a)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout fler-dart
+        uses: actions/checkout@v4
+        with:
+          path: fler-dart
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build cmake pkg-config curl git file binutils
+
+      - name: Setup Android NDK ${{ env.NDK_VERSION }}
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+
+      # ─────────────────────────────────────────────────────────────
+      # Stage 1: Clone Unicorn
+      # ─────────────────────────────────────────────────────────────
+      - name: Cache unicorn source
+        id: cache-unicorn
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.CACHE_ROOT }}/unicorn-src
+          key: unicorn-${{ env.UNICORN_VERSION }}-${{ env.NDK_VERSION }}-v1
+
+      - name: Clone Unicorn ${{ env.UNICORN_VERSION }}
+        if: steps.cache-unicorn.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$CACHE_ROOT"
+          git clone --depth 1 --branch "$UNICORN_VERSION" \
+            https://github.com/unicorn-engine/unicorn.git "$CACHE_ROOT/unicorn-src"
+          cd "$CACHE_ROOT/unicorn-src"
+          git rev-parse HEAD
+
+      # ─────────────────────────────────────────────────────────────
+      # Stage 2: Cross compile (CMake + NDK toolchain)
+      # ─────────────────────────────────────────────────────────────
+      - name: Configure with CMake
+        run: |
+          set -euo pipefail
+          SRC="$CACHE_ROOT/unicorn-src"
+          BUILD="$CACHE_ROOT/unicorn-build"
+
+          cmake -G Ninja \
+            -B "$BUILD" \
+            -S "$SRC" \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM="$ANDROID_PLATFORM" \
+            -DUNICORN_ARCH="$UNICORN_ARCH" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DUNICORN_BUILD_TESTS=OFF \
+            -DUNICORN_INSTALL=OFF
+
+          # config-host.h 由 qemu/configure + create_config 在 configure 期生成，
+          # 缺失即后续编译全挂，这里提前校验
+          if [ ! -f "$BUILD/config-host.h" ]; then
+            echo "ERROR: config-host.h was not generated (qemu/configure failed)"
+            [ -f "$BUILD/config.log" ] && tail -50 "$BUILD/config.log"
+            exit 1
+          fi
+          echo "config-host.h generated OK"
+
+      - name: Build libunicorn.a
+        run: |
+          set -euo pipefail
+          cmake --build "$CACHE_ROOT/unicorn-build" --target unicorn -j2
+          ls -lh "$CACHE_ROOT/unicorn-build/libunicorn.a"
+
+      # ─────────────────────────────────────────────────────────────
+      # Stage 3: Verify + Package
+      # ─────────────────────────────────────────────────────────────
+      - name: Verify static lib
+        run: |
+          set -euo pipefail
+          LIB="$CACHE_ROOT/unicorn-build/libunicorn.a"
+          echo "=== arch check (expect aarch64 object) ==="
+          file "$LIB"
+          echo ""
+          echo "=== symbol check (expect defined uc_open/uc_emu_start/uc_mem_map) ==="
+          for sym in uc_open uc_close uc_emu_start uc_emu_stop uc_mem_map uc_mem_read uc_mem_write uc_reg_read uc_reg_write uc_hook_add; do
+            if nm "$LIB" 2>/dev/null | grep -q " T $sym"; then
+              echo "OK: $sym defined"
+            else
+              echo "ERROR: $sym missing"; exit 1
+            fi
+          done
+
+      - name: Package static lib + headers
+        run: |
+          set -euo pipefail
+          SRC="$CACHE_ROOT/unicorn-src"
+          PKG="$CACHE_ROOT/package"
+          rm -rf "$PKG"
+          mkdir -p "$PKG/lib/arm64-v8a" "$PKG/include/unicorn"
+
+          cp "$CACHE_ROOT/unicorn-build/libunicorn.a" "$PKG/lib/arm64-v8a/"
+          cp "$SRC"/include/unicorn/*.h "$PKG/include/unicorn/"
+
+          cat > "$PKG/README.txt" <<EOF
+          Unicorn static lib for fler (arm64-v8a)
+          Unicorn version : $UNICORN_VERSION
+          Unicorn arch    : $UNICORN_ARCH
+          Android platform: $ANDROID_PLATFORM
+          NDK             : $NDK_VERSION
+          Build date      : $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          Layout (matches fler project):
+            lib/arm64-v8a/libunicorn.a -> app/libs/arm64-v8a/
+            include/unicorn/...        -> app/src/main/cpp/include/unicorn/
+
+          Static archive: linked into fler_jni.so at build time, zero runtime deps.
+          EOF
+
+          echo "=== package contents ==="
+          find "$PKG" -type f | sort
+
+          cd "$CACHE_ROOT"
+          tar czf "unicorn-static-$UNICORN_VERSION-arm64-v8a.tar.gz" package
+          ls -lh "unicorn-static-$UNICORN_VERSION-arm64-v8a.tar.gz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: unicorn-static-${{ env.UNICORN_VERSION }}-arm64-v8a
+          path: |
+            ${{ env.CACHE_ROOT }}/unicorn-static-${{ env.UNICORN_VERSION }}-arm64-v8a.tar.gz
+          retention-days: 30
+          if-no-files-found: error
