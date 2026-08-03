@@ -143,6 +143,21 @@ jobs:
             exit 1
           fi
 
+      - name: Localize collision-prone symbols
+        run: |
+          set -euo pipefail
+          # Unicorn 内嵌 QEMU 的全局符号 crc32/crc32_table/sm4_sbox 与 fler 的
+          # librz_io.a/librz_crypto.a 同名，同时链入会 duplicate symbol。
+          # 把这三个符号降为本地（仅 qemu 内部使用，非 uc_* API），
+          # 与本地开发环境（llvm-objcopy 同源处理）保持一致。
+          OBJCOPY="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objcopy"
+          "$OBJCOPY" \
+            --localize-symbol=crc32 \
+            --localize-symbol=crc32_table \
+            --localize-symbol=sm4_sbox \
+            "$CACHE_ROOT/unicorn-build/libunicorn.a"
+          echo "localized crc32/crc32_table/sm4_sbox"
+
       # ─────────────────────────────────────────────────────────────
       # Stage 3: Verify + Package
       # ─────────────────────────────────────────────────────────────
@@ -163,13 +178,21 @@ jobs:
           done
           echo ""
           echo "=== TCG core check (薄库缺失，合并归档必须有) ==="
-          for sym in tcg_exec cpu_exec; do
+          # 注意：unicorn 修改版 qemu 的符号带 _aarch64 后缀（防多架构共存冲突），
+          # 不存在裸名的 tcg_exec/cpu_exec
+          for sym in tcg_gen_code_aarch64 cpu_exec_aarch64 memory_region_init_aarch64; do
             if nm "$LIB" 2>/dev/null | grep -q " T $sym"; then
               echo "OK: $sym defined"
             else
               echo "ERROR: $sym missing - archive is the thin lib, bundling failed"; exit 1
             fi
           done
+          echo ""
+          echo "=== collision localize check (crc32 必须已降为本地) ==="
+          if nm "$LIB" 2>/dev/null | grep -qE " [TDBRW] (crc32|crc32_table|sm4_sbox)$"; then
+            echo "ERROR: collision-prone symbol still global"; exit 1
+          fi
+          echo "OK: crc32/crc32_table/sm4_sbox localized"
 
       - name: Package static lib + headers
         run: |
