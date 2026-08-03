@@ -13,7 +13,9 @@
 #   - Unicorn 的 CMake 在 configure 期执行 qemu/configure（sh 脚本）+ create_config
 #     生成 config-host.h；ubuntu runner 自带 sh/pkg-config，无需额外处理
 #     （这也是本地 Windows 无法直接构建、改走 CI 交叉编译的原因）
-#   - 产物 libunicorn.a 位于 build 根目录（非 install 布局），直接取用
+#   - 静态构建产物名为 libunicorn-static.a（CMakeLists 对静态库设了
+#     OUTPUT_NAME=unicorn-static，避免与动态库同名冲突），打包时重命名为
+#     libunicorn.a 对齐 fler 的 app/libs/arm64-v8a/ 布局
 # =============================================================================
 name: Build Unicorn static lib (arm64-v8a)
 
@@ -120,11 +122,12 @@ jobs:
           fi
           echo "config-host.h generated OK"
 
-      - name: Build libunicorn.a
+      - name: Build libunicorn-static.a
         run: |
           set -euo pipefail
           cmake --build "$CACHE_ROOT/unicorn-build" --target unicorn -j2
-          ls -lh "$CACHE_ROOT/unicorn-build/libunicorn.a"
+          # 静态库产物名为 libunicorn-static.a（Unicorn CMake 的 OUTPUT_NAME 设置）
+          ls -lh "$CACHE_ROOT/unicorn-build/libunicorn-static.a"
 
       # ─────────────────────────────────────────────────────────────
       # Stage 3: Verify + Package
@@ -132,7 +135,7 @@ jobs:
       - name: Verify static lib
         run: |
           set -euo pipefail
-          LIB="$CACHE_ROOT/unicorn-build/libunicorn.a"
+          LIB="$CACHE_ROOT/unicorn-build/libunicorn-static.a"
           echo "=== arch check (expect aarch64 object) ==="
           file "$LIB"
           echo ""
@@ -153,7 +156,7 @@ jobs:
           rm -rf "$PKG"
           mkdir -p "$PKG/lib/arm64-v8a" "$PKG/include/unicorn"
 
-          cp "$CACHE_ROOT/unicorn-build/libunicorn.a" "$PKG/lib/arm64-v8a/"
+          cp "$CACHE_ROOT/unicorn-build/libunicorn-static.a" "$PKG/lib/arm64-v8a/libunicorn.a"
           cp "$SRC"/include/unicorn/*.h "$PKG/include/unicorn/"
 
           cat > "$PKG/README.txt" <<EOF
