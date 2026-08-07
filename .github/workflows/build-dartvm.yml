@@ -5,9 +5,10 @@ on:
     branches: [main]
     tags:
       - 'v*'
-    # 回写 version.json 到 main 时不重新触发全量构建（paths 过滤对 tag 推送不生效）
+    # 回写 version.json / manifest.json 到 main 时不重新触发全量构建（paths 过滤对 tag 推送不生效）
     paths-ignore:
       - 'version.json'
+      - 'manifest.json'
   workflow_dispatch:
     inputs:
       dart-version:
@@ -23,10 +24,9 @@ on:
 env:
   NDK_VERSION: ${{ inputs.ndk-version || 'r27' }}
   DART_VERSIONS: '3.11.6 3.12.2 3.12.1 3.12.0 3.11.5 3.11.4 3.10.7 3.10.6 3.10.4 3.9.2 3.9.1 3.8.1 3.8.0'
-  # 单一数据源：矩阵与 version.json 的 dartVersions 都由它驱动（发版新增/调整版本时只改这里）
-  DART_VERSIONS_JSON: '["3.12.2","3.12.1","3.12.0","3.11.6","3.11.5","3.11.4","3.10.7","3.10.6","3.10.4","3.9.2","3.9.1","3.8.1","3.8.0"]'
   # releaseNotes：发版前更新为本次新增版本 + 更新内容
-  RELEASE_NOTES: 'v0.3.14：引擎改为静态 Capstone（dartvm.so 自带 Capstone，引擎包不再含 libcapstone.so）；Capstone 静态链接进 fler APK，SO 编辑器反汇编零引擎依赖；引擎含 13 个 Dart 版本（3.12.2/3.12.1/3.12.0/3.11.6/3.11.5/3.11.4/3.10.7/3.10.6/3.10.4/3.9.2/3.9.1/3.8.1/3.8.0），含 ICU 共享库。'
+  # 说明：版本唯一数据源是下方 matrix；manifest.json 由打包阶段按实际构建产物自动枚举生成。
+  RELEASE_NOTES: 'v0.4.0：引擎资产改为「按 Dart 版本独立 7z + 必装运行库 fler-runtime-libs.7z + manifest.json」；每版本按需下载；运行库仅 libc++_shared.so（ICU 不再随包）。'
 
 jobs:
   # ══════════════════════════════════════════════════════════
@@ -106,8 +106,8 @@ jobs:
       fail-fast: false
       matrix:
         # GitHub Actions 的 matrix 表达式无法读取 env 上下文（仅 steps/job env 可用），
-        # 因此这里显式列出版本，需与 env.DART_VERSIONS_JSON（version.json 的 dartVersions）
-        # 保持一致；发版新增/调整版本时两处同步修改。
+        # 因此这里显式列出版本 —— 版本唯一数据源；manifest.json 由打包阶段按实际产物
+        # 自动枚举生成，发版新增/调整版本时只改此处 matrix。
         dart-version:
           - '3.12.2'
           - '3.12.1'
@@ -189,10 +189,10 @@ jobs:
           retention-days: 30
 
   # ══════════════════════════════════════════════════════════
-  # STAGE 3: Package all engines + shared libs into 7z
+  # STAGE 3: Package runtime libs + per-version engines into separate 7z
   # ══════════════════════════════════════════════════════════
   package-release:
-    name: Package 7z Release
+    name: Package 7z Release (runtime libs + per-version)
     needs: [shared-libs, build-engines]
     if: always() && (needs.shared-libs.result == 'success' && needs.build-engines.result == 'success')
     runs-on: ubuntu-latest
@@ -209,78 +209,89 @@ jobs:
         with:
           path: staging/engines
 
-      - name: Assemble release package
+      - name: Assemble runtime libs archive (mandatory)
         run: |
-          mkdir -p release/fler-engines
-          mkdir -p release/fler-engines/lib
+          mkdir -p release/runtime/lib
+          echo "=== Runtime libs (mandatory: libc++_shared.so) ==="
+          # ICU 不随包：dartvm.so 在构建期已跳过 ICU 链接（CMake 仅当 ICU 库存在才 link，
+          # 见 dartvm/CMakeLists.txt），readelf 无 NEEDED libicuuc/libicudata。
+          # 若未来某版本出现 ICU NEEDED，需回归本包。
+          cp staging/shared_libs/libc++_shared.so release/runtime/lib/
+          ls -lh release/runtime/lib/
 
-          # Copy shared libraries
-          echo "=== Shared libraries ==="
-          cp staging/shared_libs/*.so release/fler-engines/lib/
-          ls -lh release/fler-engines/lib/
-
-          # Copy all version engines
-          echo ""
-          echo "=== DartVM engines ==="
+      - name: Assemble per-version engine archives
+        run: |
+          mkdir -p release/engines
+          echo "=== DartVM engines (per-version archives) ==="
           for dir in staging/engines/engine_*/; do
             [ -d "$dir" ] || continue
             for so in "$dir"*.so; do
               [ -f "$so" ] || continue
               ver=$(echo "$so" | grep -oP 'dartvm_\K[0-9.]+')
-              cp "$so" "release/fler-engines/dartvm_${ver}.so"
-              echo "  Added: dartvm_${ver}.so ($(ls -lh "$so" | awk '{print $5}'))"
+              mkdir -p "release/engines/dartvm-${ver}"
+              cp "$so" "release/engines/dartvm-${ver}/dartvm_${ver}.so"
+              echo "  Staged: dartvm_${ver}.so ($(ls -lh "$so" | awk '{print $5}'))"
             done
           done
 
-          echo ""
-          echo "=== Final package contents ==="
-          find release/fler-engines -type f | sort
-          echo ""
-          echo "Total size:"
-          du -sh release/fler-engines
-
-      - name: Create 7z archive
+      - name: Create 7z archives
         run: |
-          cd release
           # 7-Zip 23.00+ 会自动为 ARM64 ELF 可执行文件加 ARM64 BCJ filter
           # （方法 ID 0x0A），commons-compress 不支持该 filter（会报
-          # "Unsupported compression method [10]"）。
-          # runner 的 7-Zip 23.01 不支持 -myfd= 开关（24+ 才有），且所有引擎
-          # 都是 ARM64 ELF，故用 -mf=off 禁用全部过滤器，确保纯 LZMA2。
-          7z a -mx=9 -m0=lzma2 -mf=off fler-engines.7z fler-engines/
+          # "Unsupported compression method [10]"），故一律 -mf=off 禁用过滤器，
+          # 确保纯 LZMA2（与旧整包一致）。
+          # 运行库包：内含 lib/libc++_shared.so（解压到 engines/ 后落 engines/lib/）
+          cd release/runtime
+          7z a -mx=9 -m0=lzma2 -mf=off ../fler-runtime-libs.7z lib/
+          cd ../..
+          # 每版本包：内含 dartvm_<v>.so（解压到 engines/ 后落 engines/dartvm_<v>.so，
+          # 增量共存，不覆盖其它已装版本）。归档统一放 release/ 根，便于 Release 上传。
+          for dir in release/engines/dartvm-*/; do
+            [ -d "$dir" ] || continue
+            ver=$(basename "$dir")
+            cd "$dir"
+            7z a -mx=9 -m0=lzma2 -mf=off "../../${ver}.7z" dartvm_*.so
+            cd ../../..
+          done
           echo ""
-          echo "=== 7z archive ==="
-          ls -lh fler-engines.7z
-          7z l fler-engines.7z
-          cd ..
+          echo "=== 7z archives ==="
+          ls -lh release/*.7z
+          echo ""
+          echo "=== Runtime libs archive listing ==="
+          7z l release/fler-runtime-libs.7z
 
-      - name: Verify archive is commons-compress decodable
+      - name: Verify archives are commons-compress decodable
         run: |
-          cd release
+          set -e
           echo "=== Method per file (must NOT contain ARM64/BCJ/BCJ2) ==="
-          if 7z l -slt fler-engines.7z | grep -E "Method = .*(ARM64|BCJ|BCJ2)" ; then
-            echo "ERROR: archive contains unsupported filters (ARM64/BCJ/BCJ2)"
-            exit 1
-          fi
-          echo "OK: no unsupported filters"
+          for f in release/*.7z; do
+            if 7z l -slt "$f" | grep -E "Method = .*(ARM64|BCJ|BCJ2)" ; then
+              echo "ERROR: $f contains unsupported filters (ARM64/BCJ/BCJ2)"
+              exit 1
+            fi
+            echo "OK (no filters): $f"
+          done
           echo ""
           echo "=== Integrity test ==="
-          7z t fler-engines.7z
-          cd ..
+          for f in release/*.7z; do
+            7z t "$f" > /dev/null
+            echo "OK (test): $f"
+          done
 
       - name: Generate checksums
         run: |
           cd release
-          sha256sum fler-engines.7z > checksums.txt
+          sha256sum *.7z > checksums.txt
           cat checksums.txt
           cd ..
 
       - name: Upload 7z package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: fler-engines-7z
+          name: fler-engines-release
           path: |
-            release/fler-engines.7z
+            release/fler-runtime-libs.7z
+            release/dartvm-*.7z
             release/checksums.txt
           retention-days: 90
 
@@ -299,7 +310,7 @@ jobs:
       - name: Download 7z package
         uses: actions/download-artifact@v4
         with:
-          name: fler-engines-7z
+          name: fler-engines-release
           path: release-assets
 
       - name: Generate release summary
@@ -308,85 +319,91 @@ jobs:
           echo "Release assets:"
           ls -lh
           echo ""
-          echo "7z contents:"
-          7z l fler-engines.7z 2>/dev/null || echo "(7z not available, listing checksum)"
+          for f in *.7z; do
+            echo "--- $f ---"
+            7z l "$f" 2>/dev/null | tail -n +16 || true
+          done
+          echo "--- checksums.txt ---"
           cat checksums.txt 2>/dev/null || echo ""
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: fler-engines ${{ github.ref_name }}
+          name: fler-engines ${{ github.ref_name }} — Per-Version Engine Packages
           body: |
-            ## fler-engines ${{ github.ref_name }} — Unified Engine Package
+            ## fler-engines ${{ github.ref_name }} — Per-Version Engine Packages
 
-            Single 7z archive containing all Dart VM engines and shared libraries.
+            On-demand per-Dart-version engine packages + mandatory runtime libs.
 
             ### Package Contents
-
-            | Category | Files |
-            |----------|-------|
-            | **Engines** | `dartvm_3.12.2.so`, `dartvm_3.12.1.so`, `dartvm_3.12.0.so`, `dartvm_3.11.6.so`, `dartvm_3.11.5.so`, `dartvm_3.11.4.so`, `dartvm_3.10.7.so`, `dartvm_3.10.6.so`, `dartvm_3.10.4.so`, `dartvm_3.9.2.so`, `dartvm_3.9.1.so`, `dartvm_3.8.1.so`, `dartvm_3.8.0.so` |
-            | **Shared Libs** | `libicuuc.so`, `libicudata.so`, `libc++_shared.so` |
+            - **Runtime libs (mandatory)**: `fler-runtime-libs.7z` → `lib/libc++_shared.so`
+            - **Engines (per-version)**: `dartvm-<version>.7z`, each containing a single `dartvm_<version>.so` (13 versions)
 
             ### Architecture
             - **ABI**: arm64-v8a (Android ARM64)
-            - **Static Capstone**: Capstone statically linked into each `dartvm_*.so`; ICU/c++_shared linked dynamically, shared across all versions
+            - **Static Capstone**: Capstone statically linked into each `dartvm_*.so`
+            - **ICU**: not bundled (dartvm built without ICU dependency)
             - **rpath**: `$ORIGIN` for runtime shared lib resolution
 
-            ### Usage
+            ### Usage (Fler App)
+            The Fler app reads `manifest.json` (main branch) to list available remote Dart
+            versions and downloads the chosen engine on demand. See `fler-engine-on-demand-download`.
 
-            1. Download `fler-engines.7z` (~7-10MB)
-            2. Extract to `Fler/cache/engines/`
-            3. Folder structure:
-               ```
-               Fler/cache/engines/
-               ├── lib/
-               │   ├── libicuuc.so
-               │   ├── libicudata.so
-               │   └── libc++_shared.so
-               ├── dartvm_3.11.6.so
-               ├── dartvm_3.12.2.so
-               ├── dartvm_3.12.1.so
-               ├── dartvm_3.12.0.so
-               ├── dartvm_3.11.5.so
-               ├── dartvm_3.11.4.so
-               ├── dartvm_3.10.7.so
-               ├── dartvm_3.10.6.so
-               ├── dartvm_3.10.4.so
-               ├── dartvm_3.9.2.so
-               ├── dartvm_3.9.1.so
-               ├── dartvm_3.8.1.so
-               └── dartvm_3.8.0.so
-               ```
+            ### Installation Layout
+            ```
+            engines/
+            ├── lib/libc++_shared.so          ← from fler-runtime-libs.7z
+            └── dartvm_3.12.2.so             ← from dartvm-3.12.2.7z
+            ```
           files: |
-            release-assets/fler-engines.7z
+            release-assets/fler-runtime-libs.7z
+            release-assets/dartvm-*.7z
             release-assets/checksums.txt
 
-      - name: Generate version.json
+      - name: Generate manifest.json
         run: |
           TAG="${{ github.ref_name }}"
-          SIZE=$(wc -c < release-assets/fler-engines.7z)
-          DART_LIST='${{ env.DART_VERSIONS_JSON }}'
           RELEASE_NOTES='${{ env.RELEASE_NOTES }}'
-          cat > version.json <<EOF
+          BASE="https://github.com/myfler/fler-dart/releases/download/$TAG"
+          cd release-assets
+
+          RT_SHA=$(sha256sum fler-runtime-libs.7z | awk '{print $1}')
+          RT_SIZE=$(wc -c < fler-runtime-libs.7z)
+
+          ENGINES_JSON=""
+          for f in dartvm-*.7z; do
+            [ -f "$f" ] || continue
+            ver=$(echo "$f" | sed -E 's/^dartvm-([0-9.]+)\.7z$/\1/')
+            sha=$(sha256sum "$f" | awk '{print $1}')
+            size=$(wc -c < "$f")
+            [ -n "$ENGINES_JSON" ] && ENGINES_JSON="$ENGINES_JSON,"
+            ENGINES_JSON="$ENGINES_JSON { \"dartVersion\": \"$ver\", \"file\": \"$f\", \"url\": \"$BASE/$f\", \"sha256\": \"$sha\", \"sizeBytes\": $size }"
+          done
+
+          # 写到仓库根（工作区），供 Commit manifest.json 步骤读取
+          cat > ../manifest.json <<EOF
           {
-            "version": "$TAG",
-            "dartVersions": $DART_LIST,
-            "sizeBytes": $SIZE,
+            "packVersion": "$TAG",
             "releaseNotes": "$RELEASE_NOTES",
-            "downloadUrl": "https://github.com/myfler/fler-dart/releases/download/$TAG/fler-engines.7z",
-            "checksumUrl": "https://github.com/myfler/fler-dart/releases/download/$TAG/checksums.txt"
+            "runtimeLibs": {
+              "file": "fler-runtime-libs.7z",
+              "url": "$BASE/fler-runtime-libs.7z",
+              "sha256": "$RT_SHA",
+              "sizeBytes": $RT_SIZE
+            },
+            "engines": [$ENGINES_JSON]
           }
           EOF
-          cat version.json
+          echo "=== manifest.json ==="
+          cat ../manifest.json
 
-      - name: Commit version.json to main
+      - name: Commit manifest.json to main
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
             const { owner, repo } = context.repo;
-            const path = 'version.json';
+            const path = 'manifest.json';
             const content = fs.readFileSync(path, 'utf8');
             let sha = null;
             try {
@@ -396,6 +413,6 @@ jobs:
               owner, repo, path,
               branch: 'main',
               content: Buffer.from(content).toString('base64'),
-              message: 'chore: update version.json for ' + context.ref.split('/').pop(),
+              message: 'chore: update manifest.json for ' + context.ref.split('/').pop(),
               sha: sha || undefined,
             });
