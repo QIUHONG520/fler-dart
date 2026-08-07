@@ -510,6 +510,12 @@ fi
 if [ "$VER_MAJOR" -lt 3 ]; then
     VERSION_DEFINES="$VERSION_DEFINES -DHAS_TYPE_REF=ON"
 fi
+# HAS_SHARED_CLASS_TABLE: use ig->shared_class_table() instead of ClassTable.
+# Dart 2.x exposes GetUnboxedFieldsMapAt() only on SharedClassTable (not on
+# ClassTable); 3.x has it on ClassTable so it keeps the default #else path.
+if [ "$VER_MAJOR" -lt 3 ]; then
+    VERSION_DEFINES="$VERSION_DEFINES -DHAS_SHARED_CLASS_TABLE=ON"
+fi
 if [ "$VER_MAJOR" -ge 3 ]; then
     VERSION_DEFINES="$VERSION_DEFINES -DHAS_RECORD_TYPE=ON"
 fi
