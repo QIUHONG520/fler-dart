@@ -499,8 +499,16 @@ VER_MAJOR=$(echo "$DART_VERSION" | cut -d. -f1)
 VER_MINOR=$(echo "$DART_VERSION" | cut -d. -f2)
 
 VERSION_DEFINES=""
-if [ "$VER_MAJOR" -le 3 ] && [ "$VER_MINOR" -lt 1 ]; then
+# OLD_MAP_SET_NAME: Dart <3.0 (and 3.0-3.2) use the pre-refactor Map/Set layout
+# (Map/Set are not dart::VM classes; kMapCid/kSetCid absent from raw_object.h).
+# This includes all 2.x (e.g. 2.18.6), which the old minor<3 check missed.
+if [ "$VER_MAJOR" -lt 3 ] || { [ "$VER_MAJOR" -eq 3 ] && [ "$VER_MINOR" -lt 3 ]; }; then
     VERSION_DEFINES="$VERSION_DEFINES -DOLD_MAP_SET_NAME=ON"
+fi
+# HAS_TYPE_REF: the SDK still ships dart::TypeRef (removed later when
+# TypeParameter.bound was replaced by TypeParameter.owner). All 2.x have it.
+if [ "$VER_MAJOR" -lt 3 ]; then
+    VERSION_DEFINES="$VERSION_DEFINES -DHAS_TYPE_REF=ON"
 fi
 if [ "$VER_MAJOR" -ge 3 ]; then
     VERSION_DEFINES="$VERSION_DEFINES -DHAS_RECORD_TYPE=ON"
@@ -509,7 +517,11 @@ if [ "$VER_MAJOR" -ge 3 ] && [ "$VER_MINOR" -ge 6 ]; then
     VERSION_DEFINES="$VERSION_DEFINES -DUNIFORM_INTEGER_ACCESS=ON"
     VERSION_DEFINES="$VERSION_DEFINES -DNO_METHOD_EXTRACTOR_STUB=ON"
 fi
-if [ "$VER_MAJOR" -ge 2 ] && [ "$VER_MINOR" -ge 16 ]; then
+# NO_INIT_LATE_STATIC_FIELD: only for SDKs WITHOUT a separate
+# InitLateStaticFieldStub enumerator (pch.h maps it onto InitStaticFieldStub).
+# 2.16+ and all 3.x DO have the split, so this must NOT be set for them
+# (defining it for 2.18.6 causes a StubKind enumerator redefinition).
+if [ "$VER_MAJOR" -eq 2 ] && [ "$VER_MINOR" -lt 16 ]; then
     VERSION_DEFINES="$VERSION_DEFINES -DNO_INIT_LATE_STATIC_FIELD=ON"
 fi
 echo "Version defines: $VERSION_DEFINES"
