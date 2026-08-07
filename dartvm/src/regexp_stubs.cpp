@@ -73,3 +73,24 @@ FLER_DART_WEAK extern const RuntimeEntry<bool(const String&, const String&)>
         "CaseInsensitiveCompareUTF16", nullptr);
 
 } // namespace dart
+
+// ─── CreateSpecializedFunction stub (Dart 2.x) ───
+// Defined in regexp.cc (excluded from the NDK build), but referenced by
+// object.cc RegExp::New on Dart 2.x. Dart 3.x object.cc does not reference
+// it, so this stub was previously unnecessary. Signature matches
+// vm/regexp.h `void CreateSpecializedFunction(Thread*, Zone*,
+// const RegExp&, intptr_t, bool, const Object&)`.
+#include <cstdint>
+namespace dart {
+
+class RegExp;
+class Object;
+
+FLER_DART_WEAK void CreateSpecializedFunction(Thread* thread,
+                                              Zone* zone,
+                                              const RegExp& regexp,
+                                              intptr_t specialization_cid,
+                                              bool sticky,
+                                              const Object& owner) {}
+
+} // namespace dart
