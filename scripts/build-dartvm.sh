@@ -499,10 +499,10 @@ VER_MAJOR=$(echo "$DART_VERSION" | cut -d. -f1)
 VER_MINOR=$(echo "$DART_VERSION" | cut -d. -f2)
 
 VERSION_DEFINES=""
-# OLD_MAP_SET_NAME: Dart <3.0 (and 3.0-3.2) use the pre-refactor Map/Set layout
-# (Map/Set are not dart::VM classes; kMapCid/kSetCid absent from raw_object.h).
-# This includes all 2.x (e.g. 2.18.6), which the old minor<3 check missed.
-if [ "$VER_MAJOR" -lt 3 ] || { [ "$VER_MAJOR" -eq 3 ] && [ "$VER_MINOR" -lt 3 ]; }; then
+# OLD_MAP_SET_NAME: Dart 2.x only (e.g. 2.18.6) use the pre-refactor Map/Set layout.
+# (Map/Set are not dart::VM classes; kMapCid/kSetCid absent from object.h).
+# All 3.x (including 3.2.3) already have proper Map/Set VM classes.
+if [ "$VER_MAJOR" -lt 3 ]; then
     VERSION_DEFINES="$VERSION_DEFINES -DOLD_MAP_SET_NAME=ON"
 fi
 # HAS_TYPE_REF: the SDK still ships dart::TypeRef (removed later when
