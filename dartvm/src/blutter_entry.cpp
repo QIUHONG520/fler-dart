@@ -168,34 +168,54 @@ static std::string buildFunctionName(DartFunction* fn, DartClass* cls) {
 // 从对象 dump 文本提取类名（形如 "Obj!ClassName@addr" 或 "Obj!Class@addr"）
 // 对象摘要：取顶层字段的字符串/int 值（丢弃嵌套体），供 objs 轻量索引
 static std::string buildObjFieldHint(const std::string& dump) {
-    // 只保留顶层 "off_xx: 值" 中字符串与 int(0x..) 值
+    // 提取第一层字段（depth==1 的直接子字段）的字符串/int 值做摘要
+    // 格式：`  off_8: Map<...>(5) {`, `  off_1c: false`, `  off_18: "text"`
+    // 只取字符串（含引号）与 int(0x..)，拼成 "off_x=\"val\", off_y=int(0xN)"
     std::string hint;
     std::string line;
     std::istringstream iss(dump);
     while (std::getline(iss, line)) {
-        // 缩进深度 = 前导空格 / 2
+        // 前导空格数 / 2 = 层级
         size_t lead = 0;
         while (lead < line.size() && line[lead] == ' ') lead++;
         int depth = (int)(lead / 2);
         std::string t = line.substr(lead);
         if (t.empty()) continue;
-        // 顶层字段（depth 0）: off_xx: "值" 或 off_xx: int(0x..)
-        if (depth == 0) {
+        // 只看第一层直接字段：off_xx: <value>
+        if (depth == 1) {
             auto colon = t.find(':');
-            if (colon != std::string::npos) {
-                std::string val = t.substr(colon + 1);
-                size_t vs = 0;
-                while (vs < val.size() && (val[vs] == ' ' || val[vs] == '\t')) vs++;
-                val = val.substr(vs);
-                // 只取字符串与 int
-                if (!val.empty() && (val[0] == '"' || val.rfind("int(", 0) == 0)) {
-                    if (!hint.empty()) hint += ", ";
-                    // 去掉 off_xx: 前缀，保留值；字符串去引号
-                    std::string v = val;
-                    if (v.size() >= 2 && v[0] == '"' && v.back() == '"')
-                        v = v.substr(1, v.size() - 2);
-                    hint += v;
-                }
+            if (colon == std::string::npos) continue;
+            std::string key = t.substr(0, colon);
+            // 去掉尾部空格；字段名形如 off_8 / off_10_Obj!xx@addr
+            while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
+            if (key.empty()) continue;
+
+            std::string val = t.substr(colon + 1);
+            size_t vs = 0;
+            while (vs < val.size() && (val[vs] == ' ' || val[vs] == '\t')) vs++;
+            val = val.substr(vs);
+            // 去掉尾逗号/花括号标记
+            while (!val.empty() && (val.back() == ',' || val.back() == ' ' || val.back() == '\t')) val.pop_back();
+            if (val.empty()) continue;
+
+            // 只取字符串（"..."）与 int(0x..)/int(n)
+            bool isStr = val.size() >= 2 && val.front() == '"' && val.back() == '"';
+            bool isInt = val.rfind("int(", 0) == 0 && val.back() == ')';
+            if (!isStr && !isInt) continue;
+
+            if (!hint.empty()) hint += ", ";
+            if (isStr) {
+                std::string v = val.substr(1, val.size() - 2);
+                if (v.size() > 80) v = v.substr(0, 80);
+                hint += key + "=\"" + v + "\"";
+            } else {
+                hint += key + "=" + val;
+            }
+        }
+    }
+    if (hint.size() > 512) hint = hint.substr(0, 512);
+    return hint;
+}
             }
         }
     }

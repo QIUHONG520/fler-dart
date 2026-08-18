@@ -339,6 +339,36 @@ PYEOF
 fi
 
 # ═══════════════════════════════════════════════
+# Step 1e: Patch FridaWriter so a missing frida.template.js does not crash.
+# FridaWriter::Create() copies FRIDA_TEMPLATE_DIR/frida.template.js with the
+# throwing copy_file() overload. On device the compile-time template dir does
+# not exist → filesystem_error → SIGABRT. Patch to the std::error_code
+# overload so a missing template is silently skipped; the class-table tail of
+# blutter_frida.js is still appended (usable for AOT layout/offsets).
+# Idempotent: skips when the fler-dart marker is already present.
+# ═══════════════════════════════════════════════
+echo ""
+echo "─── [1e] Patching FridaWriter.cpp (tolerant template copy) ───"
+
+BLUTTER_FRIDAWRITER="$BLUTTER_DIR/blutter/src/FridaWriter.cpp"
+if ! grep -q "fler-dart tolerant template" "$BLUTTER_FRIDAWRITER" 2>/dev/null; then
+    python3 - "$BLUTTER_FRIDAWRITER" << 'PYEOF'
+import sys
+path = sys.argv[1]
+s = open(path, encoding='utf-8').read()
+old = "copy_file(FRIDA_TEMPLATE_DIR \"/frida.template.js\", filename, std::filesystem::copy_options::overwrite_existing);"
+new = ("// fler-dart tolerant template copy: missing template no longer crashes\n"
+       "\tstd::error_code _ec;\n"
+       "\tstd::filesystem::copy_file(FRIDA_TEMPLATE_DIR \"/frida.template.js\", filename,\n"
+       "\t\tstd::filesystem::copy_options::overwrite_existing, _ec);")
+assert old in s, "FridaWriter.cpp copy_file pattern not found"
+s = s.replace(old, new)
+open(path, 'w', encoding='utf-8').write(s)
+print("  FridaWriter.cpp: tolerant template copy applied")
+PYEOF
+fi
+
+# ═══════════════════════════════════════════════
 # Step 1c: Inject NDK toolchain + ICU fixes
 # ═══════════════════════════════════════════════
 echo ""
