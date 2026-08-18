@@ -1,4 +1,4 @@
-name: Build dartvm (v4 — Static Capstone)
+name: Build dartvm all(v4 — Static Capstone)
 
 on:
   push:
@@ -9,11 +9,13 @@ on:
     paths-ignore:
       - 'version.json'
       - 'manifest.json'
+      - 'dist/**'
   workflow_dispatch:
     inputs:
-      dart-version:
-        description: 'Build single version (empty = all)'
+      dart-versions:
+        description: '逗号分隔的 Dart 版本，如 3.12.2,3.10.0,2.18.6（留空 = 全部 32 个版本）'
         required: false
+        default: ''
         type: string
       ndk-version:
         description: 'Android NDK version'
@@ -23,12 +25,79 @@ on:
 
 env:
   NDK_VERSION: ${{ inputs.ndk-version || 'r27' }}
-  DART_VERSIONS: '3.12.2 3.12.1 3.12.0 3.11.6 3.11.5 3.11.4 3.11.3 3.11.2 3.11.1 3.11.0 3.10.9 3.10.8 3.10.7 3.10.6 3.10.5 3.10.4 3.10.3 3.10.2 3.10.1 3.10.0 3.9.4 3.9.3 3.9.2 3.9.1 3.9.0 3.8.3 3.8.2 3.8.1 3.8.0 3.3.4 3.2.3 2.18.6'
+  DART_VERSIONS: '2.14.0 2.14.1 2.14.2 2.14.3 2.14.4 2.15.0 2.15.1 2.16.0 2.16.1 2.16.2 2.17.0 2.17.1 2.17.3 2.17.5 2.17.6 2.17.7 2.18.0 2.18.1 2.18.2 2.18.3 2.18.4 2.18.5 2.18.6 2.18.7 2.19.0 2.19.1 2.19.2 2.19.3 2.19.4 2.19.5 2.19.6 3.0.0 3.0.1 3.0.2 3.0.3 3.0.4 3.0.5 3.0.6 3.0.7 3.1.0 3.1.1 3.1.2 3.1.3 3.1.4 3.1.5 3.2.0 3.2.1 3.2.2 3.2.3 3.2.4 3.2.5 3.2.6 3.3.0 3.3.1 3.3.2 3.3.3 3.3.4 3.4.0 3.4.1 3.4.2 3.4.3 3.4.4 3.5.0 3.5.1 3.5.2 3.5.3 3.5.4 3.6.0 3.6.1 3.6.2 3.7.0 3.7.1 3.7.2 3.7.3 3.8.0 3.8.1 3.8.2 3.8.3 3.9.0 3.9.1 3.9.2 3.9.3 3.9.4 3.10.0 3.10.1 3.10.2 3.10.3 3.10.4 3.10.5 3.10.6 3.10.7 3.10.8 3.10.9 3.11.0 3.11.1 3.11.2 3.11.3 3.11.4 3.11.5 3.11.6 3.12.0 3.12.1 3.12.2 3.13.0 3.13.1'
   # releaseNotes：发版前更新为本次新增版本 + 更新内容
-  # 说明：版本唯一数据源是下方 matrix；manifest.json 由打包阶段按实际构建产物自动枚举生成。
-  RELEASE_NOTES: 'v0.4.5：引擎数据修复——恢复完整 Blutter 产物（pp/objs/asm/ida_script/blutter_frida.js）；修复 DB 导出（strings 31195、方法名消除 anonymous closure、pp 类型正确拆分）；新增 objs 索引与 enum_map 直写 DB；objs.field_hint 摘要；FridaWriter 模板缺失不再崩溃。'
+  # 说明：版本唯一数据源是 DART_VERSIONS（resolve-versions job 展开为 matrix）；
+  # manifest.json 由打包阶段按实际构建产物自动枚举生成，发版新增/调整版本时只改 DART_VERSIONS。
+  RELEASE_NOTES: 'v0.5.0：官方全版本（2.14~3.13）——自动拉取 dart-archive stable 列表，构建 2.14.0 至 3.13.1 共 105 个版本，后续新版本发布自动纳入。'
 
 jobs:
+  # ══════════════════════════════════════════════════════════
+  # STAGE 0: Resolve target versions (push/tag = all; manual = comma list)
+  # ══════════════════════════════════════════════════════════
+  resolve-versions:
+    name: Resolve Dart versions (official ∩ supported)
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      # 从 dart-archive (Google Cloud Storage) 拉取官方 stable 版本目录列表。
+      # GCS JSON API 公开可访问，无需鉴权；返回的 prefixes 即每个 release 版本目录。
+      - name: Fetch official stable versions (dart-archive)
+        id: official
+        run: |
+          python3 <<'PYEOF'
+          import json, urllib.request
+          url = ("https://storage.googleapis.com/storage/v1/b/dart-archive/o"
+                 "?prefix=channels/stable/release/&delimiter=/&maxResults=2000")
+          try:
+              data = json.loads(urllib.request.urlopen(url, timeout=60).read().decode("utf-8"))
+              vers = []
+              for p in data.get("prefixes", []):
+                  name = p.rstrip("/").split("/")[-1]
+                  # 只保留语义化版本 x.y[.z]（排除 1.0 前的 commit 号目录如 29803/、latest/）
+                  if name and name[0].isdigit() and name.count(".") >= 1 and "-" not in name:
+                      vers.append(name)
+              with open("/tmp/official_versions.txt", "w") as f:
+                  f.write("\n".join(sorted(set(vers))) + "\n")
+              print("OK: official stable versions =", len(vers))
+          except Exception as e:
+              print("WARN: GCS fetch failed (%s), fallback to DART_VERSIONS" % e)
+              with open("/tmp/official_versions.txt", "w") as f:
+                  f.write("")  # 空 → 后续 step 用 env.DART_VERSIONS 兜底
+          PYEOF
+
+      - name: Resolve target matrix
+        id: set-matrix
+        run: |
+          # 支持范围：2.14+ 与 3.x（用户要求；2.14/2.15 需 NO_INIT_LATE_STATIC_FIELD 宏，脚本已适配）
+          if [ -s /tmp/official_versions.txt ]; then
+            awk -F. '($1==2 && $2>=14) || $1==3' /tmp/official_versions.txt | sort -u > /tmp/supported.txt
+          else
+            # GCS 不可用 → 用 env.DART_VERSIONS 静态列表
+            echo '${{ env.DART_VERSIONS }}' | tr ' ' '\n' | grep -v '^$' > /tmp/supported.txt
+          fi
+
+          if [ -z "${{ inputs.dart-versions }}" ]; then
+            # 全量：官方存在 ∩ 支持范围（未来 3.14 等发布后自动纳入，无需改代码）
+            cp /tmp/supported.txt /tmp/target.txt
+          else
+            # 手动指定：逗号分隔 → 与支持范围求交（剔除不存在的版本号）
+            echo '${{ inputs.dart-versions }}' | tr ',' '\n'               | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' > /tmp/target.txt
+            comm -12 <(sort /tmp/target.txt) <(sort /tmp/supported.txt) > /tmp/target2.txt
+            mv /tmp/target2.txt /tmp/target.txt
+          fi
+
+          if [ ! -s /tmp/target.txt ]; then
+            echo "ERROR: no valid versions resolved (check inputs)" >&2
+            exit 1
+          fi
+          csv=$(sed 's/^/"/;s/$/"/' /tmp/target.txt | paste -sd,)
+          MATRIX="{\"dart-version\":[$csv]}"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Resolved versions: $(wc -l < /tmp/target.txt)"
+          cat /tmp/target.txt
+
   # ══════════════════════════════════════════════════════════
   # STAGE 1: Build shared libraries (once, reused across versions)
   # ══════════════════════════════════════════════════════════
@@ -100,14 +169,12 @@ jobs:
   # ══════════════════════════════════════════════════════════
   build-engines:
     name: Build Engine ${{ matrix.dart-version }}
-    needs: shared-libs
+    needs: [resolve-versions, shared-libs]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        # 版本唯一数据源（全量构建列表）。workflow_dispatch 填 dart-version 时只构建该版本：
-        # inputs.dart-version 非空 → 单元素数组；push/tag 触发时 inputs 为空 → 全量列表。
-        dart-version: ${{ fromJSON(inputs.dart-version != '' && format('["{0}"]', inputs.dart-version) || '["3.12.2","3.12.1","3.12.0","3.11.6","3.11.5","3.11.4","3.11.3","3.11.2","3.11.1","3.11.0","3.10.9","3.10.8","3.10.7","3.10.6","3.10.5","3.10.4","3.10.3","3.10.2","3.10.1","3.10.0","3.9.4","3.9.3","3.9.2","3.9.1","3.9.0","3.8.3","3.8.2","3.8.1","3.8.0","3.3.4","3.2.3","2.18.6"]') }}
+      # 动态 matrix：由 resolve-versions 输出（手动输入逗号列表，或默认全量 DART_VERSIONS）
+      matrix: ${{ fromJSON(needs.resolve-versions.outputs.matrix) }}
 
     steps:
       - name: Checkout fler-dart
@@ -147,7 +214,6 @@ jobs:
       - name: Patch blutter_entry.cpp (TMPDIR support)
         run: bash fler-dart/scripts/patch-tmpdir.sh
 
-
       - name: Build dartvm.so (static capstone)
         run: |
           mkdir -p output
@@ -180,7 +246,7 @@ jobs:
   package-release:
     name: Package 7z Release (runtime libs + per-version)
     needs: [shared-libs, build-engines]
-    if: always() && (needs.shared-libs.result == 'success' && needs.build-engines.result == 'success')
+    if: always() && needs.shared-libs.result == 'success' && (needs.build-engines.result == 'success' || needs.build-engines.result == 'failure')
     runs-on: ubuntu-latest
 
     steps:
@@ -282,7 +348,135 @@ jobs:
           retention-days: 90
 
   # ══════════════════════════════════════════════════════════
-  # STAGE 4: Create GitHub Release (tag pushes only)
+  # ══════════════════════════════════════════════════════════
+  # STAGE 4: Archive 7z to repo (dist branch) + publish manifest.json
+  #   - 产物 7z 归档到独立 dist 分支（force push 只保留最新快照，仓库不膨胀）
+  #   - manifest.json / version.json 发布到 main（App 端读取入口）
+  #   - URL 策略：tag 触发 → GitHub Releases 下载；手动触发 → jsdelivr CDN (@dist)
+  # ══════════════════════════════════════════════════════════
+  archive-and-manifest:
+    name: Archive to repo + Publish manifest.json
+    needs: [shared-libs, build-engines, package-release]
+    if: always() && needs.shared-libs.result == 'success' && (needs.build-engines.result == 'success' || needs.build-engines.result == 'failure') && needs.package-release.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout main (for manifest context)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Download 7z package
+        uses: actions/download-artifact@v4
+        with:
+          name: fler-engines-release
+          path: release-assets
+
+      # ── 归档到独立 dist 分支（孤儿分支：每次重建快照，历史只有最新产物，仓库不膨胀）──
+      - name: Switch to orphan dist branch
+        run: |
+          git checkout --orphan dist
+          git rm -rf . >/dev/null 2>&1 || true
+
+      - name: Stage archives into dist/
+        run: |
+          rm -rf dist
+          mkdir -p dist/engines dist/runtime
+          cp release-assets/dartvm-*.7z dist/engines/ 2>/dev/null || true
+          cp release-assets/fler-runtime-libs.7z dist/runtime/ 2>/dev/null || true
+          cp release-assets/checksums.txt dist/ 2>/dev/null || true
+          echo "=== dist/ ==="
+          find dist -type f | sort
+          echo "引擎包数量: $(ls dist/engines/*.7z 2>/dev/null | wc -l)"
+
+      - name: Commit and force-push dist branch (latest snapshot only)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dist
+          git commit -m "chore(engines): archive $(date -u +%Y-%m-%dT%H:%M:%SZ)" || echo "no changes to commit"
+          git push --force origin dist
+
+      # ── 生成 manifest.json + version.json ──
+      - name: Generate manifest.json + version.json
+        run: |
+          cd release-assets
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+            BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          else
+            TAG="latest"
+            BASE="https://cdn.jsdelivr.net/gh/${GITHUB_REPOSITORY}@dist"
+          fi
+          RELEASE_NOTES='${{ env.RELEASE_NOTES }}'
+          RT_SHA=$(sha256sum fler-runtime-libs.7z | awk '{print $1}')
+          RT_SIZE=$(wc -c < fler-runtime-libs.7z)
+
+          ENGINES_JSON=""
+          DART_LIST=""
+          for f in dartvm-*.7z; do
+            [ -f "$f" ] || continue
+            ver=$(echo "$f" | sed -E 's/^dartvm-([0-9.]+)\.7z$/\1/')
+            sha=$(sha256sum "$f" | awk '{print $1}')
+            size=$(wc -c < "$f")
+            [ -n "$ENGINES_JSON" ] && ENGINES_JSON="$ENGINES_JSON,"
+            ENGINES_JSON="$ENGINES_JSON { \"dartVersion\": \"$ver\", \"file\": \"$f\", \"url\": \"$BASE/$f\", \"sha256\": \"$sha\", \"sizeBytes\": $size }"
+            DART_LIST="$DART_LIST \"$ver\","
+          done
+          DART_LIST=$(echo "$DART_LIST" | sed 's/,$//')
+
+          cat > ../manifest.json <<EOF
+          {
+            "packVersion": "$TAG",
+            "releaseNotes": "$RELEASE_NOTES",
+            "runtimeLibs": {
+              "file": "fler-runtime-libs.7z",
+              "url": "$BASE/fler-runtime-libs.7z",
+              "sha256": "$RT_SHA",
+              "sizeBytes": $RT_SIZE
+            },
+            "engines": [$ENGINES_JSON]
+          }
+          EOF
+
+          cat > ../version.json <<EOF
+          {
+            "version": "$TAG",
+            "dartVersions": [$DART_LIST],
+            "sizeBytes": $RT_SIZE,
+            "releaseNotes": "$RELEASE_NOTES",
+            "downloadUrl": "$BASE/manifest.json",
+            "checksumUrl": "$BASE/checksums.txt"
+          }
+          EOF
+          echo "=== manifest.json ==="
+          cat ../manifest.json
+
+      - name: Commit manifest.json + version.json to main
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const tag = context.ref.split('/').pop();
+            for (const path of ['manifest.json', 'version.json']) {
+              const content = fs.readFileSync(path, 'utf8');
+              let sha = null;
+              try {
+                sha = (await github.rest.repos.getContent({ owner, repo, path, ref: 'main' })).data.sha;
+              } catch (_) {}
+              await github.rest.repos.createOrUpdateFileContents({
+                owner, repo, path,
+                branch: 'main',
+                content: Buffer.from(content).toString('base64'),
+                message: 'chore: publish ' + path + ' for ' + tag,
+                sha: sha || undefined,
+              });
+            }
+
+  # STAGE 5: Create GitHub Release (tag pushes only)
   # ══════════════════════════════════════════════════════════
   release:
     name: Create Release
@@ -345,60 +539,3 @@ jobs:
             release-assets/fler-runtime-libs.7z
             release-assets/dartvm-*.7z
             release-assets/checksums.txt
-
-      - name: Generate manifest.json
-        run: |
-          TAG="${{ github.ref_name }}"
-          RELEASE_NOTES='${{ env.RELEASE_NOTES }}'
-          BASE="https://github.com/myfler/fler-dart/releases/download/$TAG"
-          cd release-assets
-
-          RT_SHA=$(sha256sum fler-runtime-libs.7z | awk '{print $1}')
-          RT_SIZE=$(wc -c < fler-runtime-libs.7z)
-
-          ENGINES_JSON=""
-          for f in dartvm-*.7z; do
-            [ -f "$f" ] || continue
-            ver=$(echo "$f" | sed -E 's/^dartvm-([0-9.]+)\.7z$/\1/')
-            sha=$(sha256sum "$f" | awk '{print $1}')
-            size=$(wc -c < "$f")
-            [ -n "$ENGINES_JSON" ] && ENGINES_JSON="$ENGINES_JSON,"
-            ENGINES_JSON="$ENGINES_JSON { \"dartVersion\": \"$ver\", \"file\": \"$f\", \"url\": \"$BASE/$f\", \"sha256\": \"$sha\", \"sizeBytes\": $size }"
-          done
-
-          # 写到仓库根（工作区），供 Commit manifest.json 步骤读取
-          cat > ../manifest.json <<EOF
-          {
-            "packVersion": "$TAG",
-            "releaseNotes": "$RELEASE_NOTES",
-            "runtimeLibs": {
-              "file": "fler-runtime-libs.7z",
-              "url": "$BASE/fler-runtime-libs.7z",
-              "sha256": "$RT_SHA",
-              "sizeBytes": $RT_SIZE
-            },
-            "engines": [$ENGINES_JSON]
-          }
-          EOF
-          echo "=== manifest.json ==="
-          cat ../manifest.json
-
-      - name: Commit manifest.json to main
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const { owner, repo } = context.repo;
-            const path = 'manifest.json';
-            const content = fs.readFileSync(path, 'utf8');
-            let sha = null;
-            try {
-              sha = (await github.rest.repos.getContent({ owner, repo, path, ref: 'main' })).data.sha;
-            } catch (_) {}
-            await github.rest.repos.createOrUpdateFileContents({
-              owner, repo, path,
-              branch: 'main',
-              content: Buffer.from(content).toString('base64'),
-              message: 'chore: update manifest.json for ' + context.ref.split('/').pop(),
-              sha: sha || undefined,
-            });
