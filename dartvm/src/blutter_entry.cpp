@@ -30,6 +30,7 @@
 #include "DartApp.h"
 #include "DartDumper.h"
 #include "CodeAnalyzer.h"
+#include "DartThreadInfo.h"
 #include "FridaWriter.h"
 
 #include "sqlite3.h"
@@ -85,6 +86,15 @@ static void createTables() {
         ")"
     );
     g_db.exec(
+        "CREATE TABLE IF NOT EXISTS asm_blocks ("
+        "  id INTEGER PRIMARY KEY,"
+        "  method_address INTEGER,"
+        "  size INTEGER,"
+        "  url TEXT,"
+        "  body TEXT"
+        ")"
+    );
+    g_db.exec(
         "CREATE TABLE IF NOT EXISTS strings ("
         "  id INTEGER PRIMARY KEY,"
         "  pp_offset INTEGER NOT NULL UNIQUE,"
@@ -129,23 +139,100 @@ static void createTables() {
 
 // ─── 直接内存导出（方案 A）─────────────────────
 
-// 用 AnalyzedFnData 的 asm 文本生成函数反汇编（src_code，App 端 ASM 浏览用）
-static std::string buildFunctionAsm(DartFunction* fn) {
+// ─── 完整反汇编生成（双轨）─────────────────────
+// 复刻 DartDumper::DumpCode 内层循环（DartDumper.cpp:338-391）：
+// 交错遍历 asmTexts（裸指令行）+ il_insns（IL 语义行）+ dataType 附加注释。
+//
+// standard=false：methods.src_code 用，fler 兼容格式——行首直接 `// `（无前导
+//   空格），App 端 DartCallGraphBuilder::collectEdges 要求 line[0]=='/'；
+//   `  ; extra` 后缀不影响 bl/b #0x 目标提取（hex 在空格处截断）。
+// standard=true ：asm_blocks 用，标准 DumpCode 格式——`    // ` 带缩进，
+//   与 asm/*.dart 产物逐字节一致。
+static std::string buildFunctionAsmFull(DartFunction* fn, DartApp& app, DartDumper& dumper, bool standard) {
     std::string out;
     if (!fn) return out;
     auto* data = fn->GetAnalyzedData();
-    if (data) {
-        const auto& texts = data->asmTexts.Data();
-        char buf[160];
-        for (const auto& t : texts) {
-            snprintf(buf, sizeof(buf), "// 0x%llx: %s\n",
-                     (unsigned long long)t.addr, t.text);
-            out += buf;
+    if (!data) return out;
+    const auto& asmTexts = data->asmTexts.Data();
+    auto& il_insns = data->il_insns;
+    auto il_itr = il_insns.begin();
+    AddrRange range;
+    char buf[512];
+    for (const auto& t : asmTexts) {
+        std::string extra;
+        switch (t.dataType) {
+        case AsmText::ThreadOffset:
+            extra = "THR::" + GetThreadOffsetName(t.threadOffset);
+            break;
+        case AsmText::PoolOffset:
+            extra = dumper.FlPoolDescription(t.poolOffset);
+            break;
+        case AsmText::Boolean:
+            extra = t.boolVal ? "true" : "false";
+            break;
+        case AsmText::Call: {
+            auto* fn2 = app.GetFunction(t.callAddress);
+            if (fn2) {
+                extra = fn2->FullName();
+                auto retCid = fn2->ReturnType();
+                if (retCid != dart::kIllegalCid && retCid < app.classes.size()) {
+                    auto retCls = app.classes.at(retCid);
+                    extra += std::format(" -> {} (size={:#x})", retCls->FullName(), retCls->Size());
+                }
+            }
+            break;
         }
+        default:
+            break;
+        }
+
+        if (standard) out += "    // ";
+        else out += "// ";
+
+        if (range.Has(t.addr)) {
+            if (standard) out += "    ";
+        } else {
+            while (il_itr != il_insns.end() && (*il_itr)->Start() < t.addr) {
+                if ((*il_itr)->Kind() != ILInstr::Unknown) {
+                    snprintf(buf, sizeof(buf), "0x%llx: %s\n",
+                             (unsigned long long)(*il_itr)->Start(),
+                             (*il_itr)->ToString().c_str());
+                    out += buf;
+                    if (standard) out += "    // ";
+                    else out += "// ";
+                }
+                ++il_itr;
+            }
+            if (il_itr != il_insns.end() && (*il_itr)->Start() == t.addr) {
+                if ((*il_itr)->Kind() != ILInstr::Unknown) {
+                    snprintf(buf, sizeof(buf), "0x%llx: %s\n",
+                             (unsigned long long)t.addr,
+                             (*il_itr)->ToString().c_str());
+                    out += buf;
+                    if (standard) out += "    //     ";
+                    else out += "// ";
+                    range = (*il_itr)->Range();
+                }
+                ++il_itr;
+            }
+        }
+
+        if (extra.empty())
+            snprintf(buf, sizeof(buf), "0x%llx: %s\n",
+                     (unsigned long long)t.addr, &t.text[0]);
+        else
+            snprintf(buf, sizeof(buf), "0x%llx: %s  ; %s\n",
+                     (unsigned long long)t.addr, &t.text[0], extra.c_str());
+        out += buf;
     }
-    if (out.empty()) {
-        out = fn->Name();
-    }
+    return out;
+}
+
+// src_code 用（fler 兼容格式）；空壳回退 fn->Name() 占位。
+static std::string buildFunctionAsm(DartFunction* fn, DartApp& app, DartDumper& dumper) {
+    if (!fn) return std::string();
+    std::string out = buildFunctionAsmFull(fn, app, dumper, false);
+    if (out.empty()) out = fn->Name();
     return out;
 }
 
@@ -255,7 +342,7 @@ static void extractEnumMap(const std::string& dump, const std::string& clsName,
 }
 
 // 导出 classes + methods（直接遍历 DartApp 内存结构）
-static void exportClassesAndMethods(DartApp& app, int64_t analysisId) {
+static void exportClassesAndMethods(DartApp& app, DartDumper& dumper, int64_t analysisId) {
     const auto& libs = app.fler_libs();
     int classes = 0, methods = 0;
     g_db.exec("BEGIN TRANSACTION");
@@ -297,7 +384,7 @@ static void exportClassesAndMethods(DartApp& app, int64_t analysisId) {
             // methods (class_id, name, address, size, src_code)
             for (auto* fn : cls->Functions()) {
                 if (!fn) continue;
-                const std::string asmText = buildFunctionAsm(fn);
+                const std::string asmText = buildFunctionAsm(fn, app, dumper);
                 const std::string mname = buildFunctionName(fn, cls);
                 sqlite3_stmt* st = nullptr;
                 if (sqlite3_prepare_v2(g_db.db,
@@ -318,6 +405,44 @@ static void exportClassesAndMethods(DartApp& app, int64_t analysisId) {
 
     g_db.exec("COMMIT");
     fprintf(stderr, "fler-dart: exported %d classes, %d methods\n", classes, methods);
+}
+
+// 导出 asm_blocks（标准 DumpCode 格式的完整反汇编存档，独立于 methods.src_code）。
+// 每方法一行：method_address（vaddr，与 methods.address 同坐标）、size、
+// url（来源库名）、body（完整语义反汇编，与 asm/*.dart 内容一致）。
+// 空壳方法（无 AnalyzedData / 无指令）跳过——引擎无法恢复的数据不产生记录。
+static void exportAsmBlocks(DartApp& app, DartDumper& dumper) {
+    const auto& libs = app.fler_libs();
+    int blocks = 0;
+    g_db.exec("BEGIN TRANSACTION");
+    for (auto* lib : libs) {
+        if (!lib) continue;
+        const std::string url = lib->Url();
+        for (auto* cls : lib->classes) {
+            if (!cls) continue;
+            for (auto* fn : cls->Functions()) {
+                if (!fn) continue;
+                auto* data = fn->GetAnalyzedData();
+                if (!data || data->asmTexts.Data().empty()) continue;
+                const std::string body = buildFunctionAsmFull(fn, app, dumper, true);
+                if (body.empty()) continue;
+                sqlite3_stmt* st = nullptr;
+                if (sqlite3_prepare_v2(g_db.db,
+                    "INSERT INTO asm_blocks (method_address, size, url, body) VALUES (?,?,?,?)",
+                    -1, &st, nullptr) == SQLITE_OK) {
+                    sqlite3_bind_int64(st, 1, (int64_t)fn->Address());
+                    sqlite3_bind_int64(st, 2, (int64_t)fn->Size());
+                    sqlite3_bind_text(st, 3, url.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(st, 4, body.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_step(st);
+                }
+                sqlite3_finalize(st);
+                blocks++;
+            }
+        }
+    }
+    g_db.exec("COMMIT");
+    fprintf(stderr, "fler-dart: exported %d asm_blocks\n", blocks);
 }
 
 // 导出 pp_entries + strings（复用 DartDumper 的对象池描述）
@@ -533,7 +658,9 @@ int blutter_analyze(const char* so_path, const char* db_path, const char* out_di
         app.EnterScope();
         {
             DartDumper dumper{ app };
-            exportClassesAndMethods(app, 0);
+            exportClassesAndMethods(app, dumper, 0);
+            // 独立表：标准 DumpCode 格式完整反汇编存档（与 asm/*.dart 一致）
+            exportAsmBlocks(app, dumper);
             // simpleForm=false：恢复标准描述格式 + 填充 knownObjectPtrs
             exportObjectPool(app, dumper, 0);
             // 落地全部标准产物
