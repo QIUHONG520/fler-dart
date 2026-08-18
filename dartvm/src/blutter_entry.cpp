@@ -216,12 +216,6 @@ static std::string buildObjFieldHint(const std::string& dump) {
     if (hint.size() > 512) hint = hint.substr(0, 512);
     return hint;
 }
-            }
-        }
-    }
-    if (hint.size() > 512) hint = hint.substr(0, 512);
-    return hint;
-}
 
 // 从 dump 文本检测枚举：Super!_Enum : { off_8: int(0x..), off_10: "name" }
 static void extractEnumMap(const std::string& dump, const std::string& clsName,
