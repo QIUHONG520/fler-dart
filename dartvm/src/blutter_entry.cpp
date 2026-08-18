@@ -175,9 +175,11 @@ static std::string buildFunctionAsmFull(DartFunction* fn, DartApp& app, DartDump
             if (fn2) {
                 extra = fn2->FullName();
                 auto retCid = fn2->ReturnType();
-                if (retCid != dart::kIllegalCid && retCid < app.classes.size()) {
-                    auto retCls = app.classes.at(retCid);
-                    extra += std::format(" -> {} (size={:#x})", retCls->FullName(), retCls->Size());
+                if (retCid != dart::kIllegalCid) {
+                    auto* retCls = app.GetClass(retCid);
+                    if (retCls) {
+                        extra += std::format(" -> {} (size={:#x})", retCls->FullName(), retCls->Size());
+                    }
                 }
             }
             break;
