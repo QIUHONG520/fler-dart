@@ -356,11 +356,11 @@ if ! grep -q "fler-dart tolerant template" "$BLUTTER_FRIDAWRITER" 2>/dev/null; t
 import sys
 path = sys.argv[1]
 s = open(path, encoding='utf-8').read()
-old = "copy_file(FRIDA_TEMPLATE_DIR \"/frida.template.js\", filename, std::filesystem::copy_options::overwrite_existing);"
+old = "std::filesystem::copy_file(FRIDA_TEMPLATE_DIR \"/frida.template.js\", filename, std::filesystem::copy_options::overwrite_existing);"
 new = ("// fler-dart tolerant template copy: missing template no longer crashes\n"
-       "\tstd::error_code _ec;\n"
-       "\tstd::filesystem::copy_file(FRIDA_TEMPLATE_DIR \"/frida.template.js\", filename,\n"
-       "\t\tstd::filesystem::copy_options::overwrite_existing, _ec);")
+       "std::error_code _ec;\n"
+       "std::filesystem::copy_file(FRIDA_TEMPLATE_DIR \"/frida.template.js\", filename,\n"
+       "    std::filesystem::copy_options::overwrite_existing, _ec);")
 assert old in s, "FridaWriter.cpp copy_file pattern not found"
 s = s.replace(old, new)
 open(path, 'w', encoding='utf-8').write(s)
