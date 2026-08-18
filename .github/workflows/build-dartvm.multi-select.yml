@@ -1,4 +1,4 @@
-name: Build dartvm (v4 — Static Capstone)
+name: Build dartvm multi (v4 — Static Capstone)
 
 on:
   push:
