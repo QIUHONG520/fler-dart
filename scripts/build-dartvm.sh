@@ -563,6 +563,44 @@ fi
 echo "Version defines: $VERSION_DEFINES"
 
 # ═══════════════════════════════════════════════
+# Step 2d: pch.h compatibility patch (old Dart VM without immutable map/set)
+# - blutter 的 pch.h 引用了 ImmutableLinkedHashMap/Set 与
+#   kImmutableLinkedHashMapCid/kImmutableLinkedHashSetCid
+# - 但老版本 Dart VM（如 2.14/2.15，可能到 2.17）没有独立的 immutable
+#   Map/Set 类，const map/set 就是普通 LinkedHashMap（无独立 CID）
+# - 动态检测 raw_object.h：有 CID 则跳过；没有则把 pch.h 的 immutable
+#   引用退化为可变 LinkedHashMap（与老 VM 布局一致）
+# - 幂等：已含 fler-dart 标记则跳过
+# ═══════════════════════════════════════════════
+echo ""
+echo "─── [2d] Checking pch.h immutable map/set compatibility ───"
+
+BLUTTER_PCH_H="$BLUTTER_DIR/blutter/src/pch.h"
+DART_RAW_OBJ=$(find "$PACKAGES_DIR/include" -path "*/vm/raw_object.h" 2>/dev/null | head -1)
+if [ -n "$DART_RAW_OBJ" ] && ! grep -q "kImmutableLinkedHashMapCid" "$DART_RAW_OBJ"; then
+    if ! grep -q "fler-dart pch compat" "$BLUTTER_PCH_H" 2>/dev/null; then
+        python3 - "$BLUTTER_PCH_H" << 'PYEOF'
+import sys
+path = sys.argv[1]
+s = open(path, encoding='utf-8').read()
+# 只替换 immutable map/set 相关 token（老 VM 中不存在）
+s = s.replace("ImmutableLinkedHashMap", "LinkedHashMap")
+s = s.replace("ImmutableLinkedHashSet", "LinkedHashSet")
+s = s.replace("kImmutableLinkedHashMapCid", "kLinkedHashMapCid")
+s = s.replace("kImmutableLinkedHashSetCid", "kLinkedHashSetCid")
+# 幂等标记
+s = "// fler-dart pch compat: immutable map/set degraded to LinkedHashMap for old Dart VM\n" + s
+open(path, 'w', encoding='utf-8').write(s)
+print("  pch.h: immutable map/set -> LinkedHashMap (old Dart VM, no immutable CID)")
+PYEOF
+    else
+        echo "  pch.h: fler-dart pch compat 已应用，跳过"
+    fi
+else
+    echo "  pch.h: Dart VM 有 immutable map/set CID，无需补丁"
+fi
+
+# ═══════════════════════════════════════════════
 # Step 2c: Download SQLite amalgamation
 # ═══════════════════════════════════════════════
 if [ ! -f "$SQLITE_DIR/sqlite3.c" ]; then
