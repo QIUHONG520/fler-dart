@@ -461,7 +461,7 @@ jobs:
             # 手动触发：产物已归档到 dist 分支的 dist/ 目录，走 raw.githubusercontent.com
             # （jsdelivr 对 force-push 的孤儿分支解析不稳定，会 404）
             TAG="latest"
-            BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/refs/heads/dist/dist"
+            BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/refs/heads/dist/dist/engines/"
           fi
           RELEASE_NOTES='${{ env.RELEASE_NOTES }}'
           RT_SHA=$(sha256sum fler-runtime-libs.7z | awk '{print $1}')
