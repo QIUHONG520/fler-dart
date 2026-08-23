@@ -541,9 +541,11 @@ if [ "$VER_MAJOR" -lt 2 ] || { [ "$VER_MAJOR" -eq 2 ] && [ "$VER_MINOR" -lt 19 ]
         VERSION_DEFINES="$VERSION_DEFINES -DOLD_MAP_NO_IMMUTABLE=ON"
     fi
 fi
-# HAS_TYPE_REF: the SDK still ships dart::TypeRef (removed later when
-# TypeParameter.bound was replaced by TypeParameter.owner). All 2.x have it.
-if [ "$VER_MAJOR" -lt 3 ]; then
+# HAS_TYPE_REF: SDK 仍提供 dart::TypeRef（TypeParameter.bound 返回 TypeRef）。
+# 该重构（bound → owner）在 3.1 前后完成，3.0.x 仍保留 TypeRef；
+# 动态检测 object.h 里是否还有 class TypeRef（比硬编码版本号更稳）。
+DART_OBJ_H=$(find "$PACKAGES_DIR/include" -path "*/vm/object.h" 2>/dev/null | head -1)
+if [ -n "$DART_OBJ_H" ] && grep -q "class TypeRef" "$DART_OBJ_H"; then
     VERSION_DEFINES="$VERSION_DEFINES -DHAS_TYPE_REF=ON"
 fi
 # HAS_SHARED_CLASS_TABLE: 2.18 及更早用 ig->shared_class_table() 取 GetUnboxedFieldsMapAt()
