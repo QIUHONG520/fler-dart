@@ -560,90 +560,19 @@ fi
 if [ "$VER_MAJOR" -eq 2 ] && [ "$VER_MINOR" -lt 16 ]; then
     VERSION_DEFINES="$VERSION_DEFINES -DNO_INIT_LATE_STATIC_FIELD=ON"
 fi
-echo "Version defines: $VERSION_DEFINES"
-
-# ═══════════════════════════════════════════════
-# Step 2d: pch.h compatibility patch (old Dart VM without immutable map/set)
-# - blutter 的 pch.h 引用了 ImmutableLinkedHashMap/Set 与
-#   kImmutableLinkedHashMapCid/kImmutableLinkedHashSetCid
-# - 但老版本 Dart VM（如 2.14/2.15，可能到 2.17）没有独立的 immutable
-#   Map/Set 类，const map/set 就是普通 LinkedHashMap（无独立 CID）
-# - 动态检测 raw_object.h：有 CID 则跳过；没有则把 pch.h 的 immutable
-#   引用退化为可变 LinkedHashMap（与老 VM 布局一致）
-# - 幂等：已含 fler-dart 标记则跳过
-# ═══════════════════════════════════════════════
-echo ""
-echo "─── [2d] Checking pch.h immutable map/set compatibility ───"
-
-BLUTTER_PCH_H="$BLUTTER_DIR/blutter/src/pch.h"
-DART_RAW_OBJ=$(find "$PACKAGES_DIR/include" -path "*/vm/raw_object.h" 2>/dev/null | head -1)
-if [ -n "$DART_RAW_OBJ" ] && ! grep -q "kImmutableLinkedHashMapCid" "$DART_RAW_OBJ"; then
-    if ! grep -q "fler-dart pch compat" "$BLUTTER_PCH_H" 2>/dev/null; then
-        python3 - "$BLUTTER_PCH_H" << 'PYEOF'
-import sys
-path = sys.argv[1]
-s = open(path, encoding='utf-8').read()
-# 只替换 immutable map/set 相关 token（老 VM 中不存在）
-s = s.replace("ImmutableLinkedHashMap", "LinkedHashMap")
-s = s.replace("ImmutableLinkedHashSet", "LinkedHashSet")
-s = s.replace("kImmutableLinkedHashMapCid", "kLinkedHashMapCid")
-s = s.replace("kImmutableLinkedHashSetCid", "kLinkedHashSetCid")
-# 幂等标记
-s = "// fler-dart pch compat: immutable map/set degraded to LinkedHashMap for old Dart VM\n" + s
-open(path, 'w', encoding='utf-8').write(s)
-print("  pch.h: immutable map/set -> LinkedHashMap (old Dart VM, no immutable CID)")
-PYEOF
-    else
-        echo "  pch.h: fler-dart pch compat 已应用，跳过"
-    fi
-else
-    echo "  pch.h: Dart VM 有 immutable map/set CID，无需补丁"
-fi
-
-# ═══════════════════════════════════════════════
-# Step 2e: DartClass.cpp compatibility patch (kLastInternalOnlyCid)
-# - blutter 的 DartClass.cpp 引用 dart::kLastInternalOnlyCid（仅内部类 CID 上界）
-# - 该常量在较老 Dart VM（2.14 等）的 class_id.h 中不存在（2.18+ 才有）
-# - 动态检测：无该常量则定义 FLER_NO_LAST_INTERNAL_ONLY_CID 宏，
-#   并 patch DartClass.cpp 让该判断退化为只跳过未加载的类
-# - 幂等：已含 fler-dart 标记则跳过
-# ═══════════════════════════════════════════════
-echo ""
-echo "─── [2e] Checking kLastInternalOnlyCid compatibility ───"
-
+# 老版本 VM 兼容宏（动态检测头文件，避免硬编码版本边界）
+# blutter 源码里已有 #ifdef NO_LAST_INTERNAL_ONLY_CID / #ifdef OLD_MAP_NO_IMMUTABLE 分支
 DART_CID_H=$(find "$PACKAGES_DIR/include" -path "*/vm/class_id.h" 2>/dev/null | head -1)
+DART_RAW_OBJ_H=$(find "$PACKAGES_DIR/include" -path "*/vm/raw_object.h" 2>/dev/null | head -1)
+# NO_LAST_INTERNAL_ONLY_CID：老版本无 kLastInternalOnlyCid（DartClass.cpp 跳过 internal-only 判断）
 if [ -n "$DART_CID_H" ] && ! grep -q "kLastInternalOnlyCid" "$DART_CID_H"; then
-    # 定义宏：让 DartClass.cpp 跳过 internal-only CID 判断（老 VM 无此常量）
-    VERSION_DEFINES="$VERSION_DEFINES -DFLER_NO_LAST_INTERNAL_ONLY_CID"
-    echo "  class_id.h: 无 kLastInternalOnlyCid，已定义 FLER_NO_LAST_INTERNAL_ONLY_CID"
-
-    # patch blutter/src/DartClass.cpp
-    BLUTTER_DARTCLASS_CPP="$BLUTTER_DIR/blutter/src/DartClass.cpp"
-    if ! grep -q "fler-dart kLastInternalOnlyCid compat" "$BLUTTER_DARTCLASS_CPP" 2>/dev/null; then
-        python3 - "$BLUTTER_DARTCLASS_CPP" << 'PYEOF'
-import sys
-path = sys.argv[1]
-s = open(path, encoding='utf-8').read()
-old = "        if (!cls.is_loaded() || id <= dart::kLastInternalOnlyCid) {"
-new = ("#ifdef FLER_NO_LAST_INTERNAL_ONLY_CID\n"
-       "        if (!cls.is_loaded()) {\n"
-       "#else\n"
-       "        if (!cls.is_loaded() || id <= dart::kLastInternalOnlyCid) {\n"
-       "#endif")
-if old not in s:
-    print("  WARN: DartClass.cpp 目标行未找到，跳过 patch（可能已变更）")
-else:
-    s = s.replace(old, new, 1)
-    s = "// fler-dart kLastInternalOnlyCid compat: skip internal-only check on old VM\n" + s
-    open(path, 'w', encoding='utf-8').write(s)
-    print("  DartClass.cpp: kLastInternalOnlyCid 判断已加宏保护")
-PYEOF
-    else
-        echo "  DartClass.cpp: fler-dart 标记已存在，跳过"
-    fi
-else
-    echo "  class_id.h: 有 kLastInternalOnlyCid，无需补丁"
+    VERSION_DEFINES="$VERSION_DEFINES -DNO_LAST_INTERNAL_ONLY_CID=ON"
 fi
+# OLD_MAP_NO_IMMUTABLE：老版本无 immutable Map/Set CID（pch.h 退化为 LinkedHashMap）
+if [ -n "$DART_RAW_OBJ_H" ] && ! grep -q "kImmutableLinkedHashMapCid" "$DART_RAW_OBJ_H"; then
+    VERSION_DEFINES="$VERSION_DEFINES -DOLD_MAP_NO_IMMUTABLE=ON"
+fi
+echo "Version defines: $VERSION_DEFINES"
 
 # ═══════════════════════════════════════════════
 # Step 2c: Download SQLite amalgamation
