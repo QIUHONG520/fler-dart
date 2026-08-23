@@ -601,6 +601,51 @@ else
 fi
 
 # ═══════════════════════════════════════════════
+# Step 2e: DartClass.cpp compatibility patch (kLastInternalOnlyCid)
+# - blutter 的 DartClass.cpp 引用 dart::kLastInternalOnlyCid（仅内部类 CID 上界）
+# - 该常量在较老 Dart VM（2.14 等）的 class_id.h 中不存在（2.18+ 才有）
+# - 动态检测：无该常量则定义 FLER_NO_LAST_INTERNAL_ONLY_CID 宏，
+#   并 patch DartClass.cpp 让该判断退化为只跳过未加载的类
+# - 幂等：已含 fler-dart 标记则跳过
+# ═══════════════════════════════════════════════
+echo ""
+echo "─── [2e] Checking kLastInternalOnlyCid compatibility ───"
+
+DART_CID_H=$(find "$PACKAGES_DIR/include" -path "*/vm/class_id.h" 2>/dev/null | head -1)
+if [ -n "$DART_CID_H" ] && ! grep -q "kLastInternalOnlyCid" "$DART_CID_H"; then
+    # 定义宏：让 DartClass.cpp 跳过 internal-only CID 判断（老 VM 无此常量）
+    VERSION_DEFINES="$VERSION_DEFINES -DFLER_NO_LAST_INTERNAL_ONLY_CID"
+    echo "  class_id.h: 无 kLastInternalOnlyCid，已定义 FLER_NO_LAST_INTERNAL_ONLY_CID"
+
+    # patch blutter/src/DartClass.cpp
+    BLUTTER_DARTCLASS_CPP="$BLUTTER_DIR/blutter/src/DartClass.cpp"
+    if ! grep -q "fler-dart kLastInternalOnlyCid compat" "$BLUTTER_DARTCLASS_CPP" 2>/dev/null; then
+        python3 - "$BLUTTER_DARTCLASS_CPP" << 'PYEOF'
+import sys
+path = sys.argv[1]
+s = open(path, encoding='utf-8').read()
+old = "        if (!cls.is_loaded() || id <= dart::kLastInternalOnlyCid) {"
+new = ("#ifdef FLER_NO_LAST_INTERNAL_ONLY_CID\n"
+       "        if (!cls.is_loaded()) {\n"
+       "#else\n"
+       "        if (!cls.is_loaded() || id <= dart::kLastInternalOnlyCid) {\n"
+       "#endif")
+if old not in s:
+    print("  WARN: DartClass.cpp 目标行未找到，跳过 patch（可能已变更）")
+else:
+    s = s.replace(old, new, 1)
+    s = "// fler-dart kLastInternalOnlyCid compat: skip internal-only check on old VM\n" + s
+    open(path, 'w', encoding='utf-8').write(s)
+    print("  DartClass.cpp: kLastInternalOnlyCid 判断已加宏保护")
+PYEOF
+    else
+        echo "  DartClass.cpp: fler-dart 标记已存在，跳过"
+    fi
+else
+    echo "  class_id.h: 有 kLastInternalOnlyCid，无需补丁"
+fi
+
+# ═══════════════════════════════════════════════
 # Step 2c: Download SQLite amalgamation
 # ═══════════════════════════════════════════════
 if [ ! -f "$SQLITE_DIR/sqlite3.c" ]; then
