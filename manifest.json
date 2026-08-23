@@ -1,11 +1,11 @@
 {
   "packVersion": "latest",
-  "releaseNotes": "v0.5.0：官方全版本（2.14~3.13）——自动拉取 dart-archive stable 列表，构建 2.14.0 至 3.13.1 共 105 个版本，后续新版本发布自动纳入，排除构建时失败的版本。",
+  "releaseNotes": "v0.5.0：官方全版本（2.14~3.13）——自动拉取 dart-archive stable 列表，构建 2.14.0 至 3.13.1 共 105 个版本，后续新版本发布自动纳入。",
   "runtimeLibs": {
     "file": "fler-runtime-libs.7z",
-    "url": "https://raw.githubusercontent.com/QIUHONG520/fler-dart/refs/heads/dist/dist/engines/fler-runtime-libs.7z",
-    "sha256": "1c88b175a5b07dce1c08e9fded33c388f82183ddcb4780a284438c7c629c95da",
+    "url": "https://raw.githubusercontent.com/QIUHONG520/fler-dart/refs/heads/dist/dist/fler-runtime-libs.7z",
+    "sha256": "219f10a194efe2fccbb596434aaae59892932b80d55b592666323abe81e1fca4",
     "sizeBytes": 345624
   },
-  "engines": []
+  "engines": [ { "dartVersion": "2.14.4", "file": "dartvm-2.14.4.7z", "url": "https://raw.githubusercontent.com/QIUHONG520/fler-dart/refs/heads/dist/dist/dartvm-2.14.4.7z", "sha256": "1f445588c20041dc4717056a19bf498c4bf437619662841a28ee1dfd4cb0bb2a", "sizeBytes": 1634096 }]
 }
