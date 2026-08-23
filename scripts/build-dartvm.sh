@@ -36,12 +36,10 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_ROOT=""
 JOBS=$(nproc 2>/dev/null || echo 4)
 BLUTTER_REPO="https://github.com/worawit/blutter.git"
-# 固定 blutter commit：528acbe 为 Debug Repro 宿主实测可正常分析 Dart 3.12.1 的版本
-# 更新至最新4a60版本
-# （详见 dev-progress 引擎根因排查）。不随上游漂移，保证引擎与宿主行为一致。
-# 该 commit 无需任何 fler-dart 补丁（Step 1b / patch-elfhelper 已移除）。
-#BLUTTER_COMMIT="528acbe83ba35a3a53fb97b231cb5f968c7068d1"
-BLUTYER_COMMIT="4a60ac648bf448c5a7596437243bcd0b9376fdf0"
+# blutter 固定 commit（main HEAD）
+# 已适配 3.13 的 Stub 枚举重构（VM_STUB_CODE_LIST 拆分）；
+# 3.13 的 AOT_Closure_* offset 布局变化上游尚未适配，3.13 暂无法构建。
+BLUTTER_COMMIT="4a60ac648bf448c5a7596437243bcd0b9376fdf0"
 # 默认静态 capstone：dartvm.so 自带 Capstone，引擎包不再产 libcapstone.so
 # （capstone 已静态进 fler APK）。--dynamic-capstone 可切回旧动态模式。
 USE_SHARED_CAPSTONE="OFF"
@@ -288,7 +286,7 @@ echo "Blutter: $BLUTTER_DIR @ $(git -C "$BLUTTER_DIR" rev-parse HEAD)"
 # Step 1b / 1b-elf：已移除
 # - Step 1b（closure.entry_point → func.entry_point）曾为编译兼容，但 DART_PRECOMPILED_RUNTIME
 #   补齐后 Closure::entry_point() 在所有矩阵版本均存在，无需补丁。
-# - patch-elfhelper：528acbe 的 ElfHelper 宿主验证可正常分析，非必需。
+# - patch-elfhelper：4a60ac6 的 ElfHelper 无需此补丁。
 # ═══════════════════════════════════════════════
 
 # ═══════════════════════════════════════════════
@@ -525,56 +523,58 @@ if command -v file > /dev/null; then
 fi
 
 # ═══════════════════════════════════════════════
-# Step 2b: Version-specific defines
+# Step 2b: 版本兼容宏（对齐 blutter.py find_compat_macro 官方逻辑，grep 检测头文件）
 # ═══════════════════════════════════════════════
 VER_MAJOR=$(echo "$DART_VERSION" | cut -d. -f1)
-VER_MINOR=$(echo "$DART_VERSION" | cut -d. -f2)
 
 VERSION_DEFINES=""
-# OLD_MAP_SET_NAME: 2.18 及更早使用 pre-refactor Map/Set 布局（Map/Set 非 VM 类，
-# 用 LinkedHashMap/LinkedHashSet）。2.19 起 Map/Set 已是 VM 类（object.h 里 class Map/Set，
-# 与 3.x 一致），不再需要。
-if [ "$VER_MAJOR" -lt 2 ] || { [ "$VER_MAJOR" -eq 2 ] && [ "$VER_MINOR" -lt 19 ]; }; then
+DART_VM_INC="$DARTVM_INCLUDE_DIR/vm"
+CLASS_ID_H="$DART_VM_INC/class_id.h"
+
+# 老 Map/Set 布局（class_id.h 含 V(LinkedHashMap)，2.18 及更早）
+if grep -q "V(LinkedHashMap)" "$CLASS_ID_H"; then
     VERSION_DEFINES="$VERSION_DEFINES -DOLD_MAP_SET_NAME=ON"
-    # OLD_MAP_NO_IMMUTABLE：这些老版本（2.14~2.17）无 immutable Map/Set CID，
-    # 需退化 ConstMap/ConstSet 为 LinkedHashMap（2.18 有 immutable，检测自动跳过）
-    DART_RAW_OBJ_H=$(find "$PACKAGES_DIR/include" -path "*/vm/raw_object.h" 2>/dev/null | head -1)
-    if [ -n "$DART_RAW_OBJ_H" ] && ! grep -q "kImmutableLinkedHashMapCid" "$DART_RAW_OBJ_H"; then
+    # 无 immutable Map/Set（2.14~2.17）
+    if ! grep -q "V(ImmutableLinkedHashMap)" "$CLASS_ID_H"; then
         VERSION_DEFINES="$VERSION_DEFINES -DOLD_MAP_NO_IMMUTABLE=ON"
     fi
 fi
-# HAS_TYPE_REF: SDK 仍提供 dart::TypeRef（TypeParameter.bound 返回 TypeRef）。
-# 该重构（bound → owner）在 3.1 前后完成，3.0.x 仍保留 TypeRef；
-# 动态检测 object.h 里是否还有 class TypeRef（比硬编码版本号更稳）。
-DART_OBJ_H=$(find "$PACKAGES_DIR/include" -path "*/vm/object.h" 2>/dev/null | head -1)
-if [ -n "$DART_OBJ_H" ] && grep -q "class TypeRef" "$DART_OBJ_H"; then
-    VERSION_DEFINES="$VERSION_DEFINES -DHAS_TYPE_REF=ON"
-fi
-# HAS_SHARED_CLASS_TABLE: 2.18 及更早用 ig->shared_class_table() 取 GetUnboxedFieldsMapAt()
-# （老版本只在 SharedClassTable 上有）。2.19 起 IsolateGroup 移除 shared_class_table()，
-# 改为直接 ClassTable（与 3.x 一致），走默认 #else 路径。
-if [ "$VER_MAJOR" -lt 2 ] || { [ "$VER_MAJOR" -eq 2 ] && [ "$VER_MINOR" -lt 19 ]; }; then
-    VERSION_DEFINES="$VERSION_DEFINES -DHAS_SHARED_CLASS_TABLE=ON"
-fi
-if [ "$VER_MAJOR" -ge 3 ]; then
-    VERSION_DEFINES="$VERSION_DEFINES -DHAS_RECORD_TYPE=ON"
-fi
-if [ "$VER_MAJOR" -ge 3 ] && [ "$VER_MINOR" -ge 6 ]; then
-    VERSION_DEFINES="$VERSION_DEFINES -DUNIFORM_INTEGER_ACCESS=ON"
-    VERSION_DEFINES="$VERSION_DEFINES -DNO_METHOD_EXTRACTOR_STUB=ON"
-fi
-# NO_INIT_LATE_STATIC_FIELD: only for SDKs WITHOUT a separate
-# InitLateStaticFieldStub enumerator (pch.h maps it onto InitStaticFieldStub).
-# 2.16+ and all 3.x DO have the split, so this must NOT be set for them
-# (defining it for 2.18.6 causes a StubKind enumerator redefinition).
-if [ "$VER_MAJOR" -eq 2 ] && [ "$VER_MINOR" -lt 16 ]; then
-    VERSION_DEFINES="$VERSION_DEFINES -DNO_INIT_LATE_STATIC_FIELD=ON"
-fi
-# NO_LAST_INTERNAL_ONLY_CID：老版本（2.14~2.17）无 kLastInternalOnlyCid（DartClass.cpp 跳过 internal-only 判断）
-DART_CID_H=$(find "$PACKAGES_DIR/include" -path "*/vm/class_id.h" 2>/dev/null | head -1)
-if [ -n "$DART_CID_H" ] && ! grep -q "kLastInternalOnlyCid" "$DART_CID_H"; then
+
+# 无 kLastInternalOnlyCid（2.14~2.17）
+if ! grep -q " kLastInternalOnlyCid " "$CLASS_ID_H"; then
     VERSION_DEFINES="$VERSION_DEFINES -DNO_LAST_INTERNAL_ONLY_CID=ON"
 fi
+
+# 有 TypeRef（2.x~3.0，3.1 移除）
+if grep -q "V(TypeRef)" "$CLASS_ID_H"; then
+    VERSION_DEFINES="$VERSION_DEFINES -DHAS_TYPE_REF=ON"
+fi
+
+# 有 RecordType（3.x）
+if [ "$VER_MAJOR" -ge 3 ] && grep -q "V(RecordType)" "$CLASS_ID_H"; then
+    VERSION_DEFINES="$VERSION_DEFINES -DHAS_RECORD_TYPE=ON"
+fi
+
+# 有 SharedClassTable（2.18 及更早，2.19 起并入 ClassTable）
+if grep -q "class SharedClassTable {" "$DART_VM_INC/class_table.h"; then
+    VERSION_DEFINES="$VERSION_DEFINES -DHAS_SHARED_CLASS_TABLE=ON"
+fi
+
+# 无 InitLateStaticField stub（2.14~2.15）
+if ! grep -q "V(InitLateStaticField)" "$DART_VM_INC/stub_code_list.h"; then
+    VERSION_DEFINES="$VERSION_DEFINES -DNO_INIT_LATE_STATIC_FIELD=ON"
+fi
+
+# 无 method extractor code（3.4 起）
+if ! grep -q "build_generic_method_extractor_code)" "$DART_VM_INC/object_store.h"; then
+    VERSION_DEFINES="$VERSION_DEFINES -DNO_METHOD_EXTRACTOR_STUB=ON"
+fi
+
+# 无 AsTruncatedInt64Value（3.6 起整数访问统一为 Value()）
+if ! grep -q "AsTruncatedInt64Value()" "$DART_VM_INC/object.h"; then
+    VERSION_DEFINES="$VERSION_DEFINES -DUNIFORM_INTEGER_ACCESS=ON"
+fi
+
 echo "Version defines: $VERSION_DEFINES"
 
 # ═══════════════════════════════════════════════
