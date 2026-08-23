@@ -546,10 +546,10 @@ fi
 if [ "$VER_MAJOR" -lt 3 ]; then
     VERSION_DEFINES="$VERSION_DEFINES -DHAS_TYPE_REF=ON"
 fi
-# HAS_SHARED_CLASS_TABLE: use ig->shared_class_table() instead of ClassTable.
-# Dart 2.x exposes GetUnboxedFieldsMapAt() only on SharedClassTable (not on
-# ClassTable); 3.x has it on ClassTable so it keeps the default #else path.
-if [ "$VER_MAJOR" -lt 3 ]; then
+# HAS_SHARED_CLASS_TABLE: 2.18 及更早用 ig->shared_class_table() 取 GetUnboxedFieldsMapAt()
+# （老版本只在 SharedClassTable 上有）。2.19 起 IsolateGroup 移除 shared_class_table()，
+# 改为直接 ClassTable（与 3.x 一致），走默认 #else 路径。
+if [ "$VER_MAJOR" -lt 2 ] || { [ "$VER_MAJOR" -eq 2 ] && [ "$VER_MINOR" -lt 19 ]; }; then
     VERSION_DEFINES="$VERSION_DEFINES -DHAS_SHARED_CLASS_TABLE=ON"
 fi
 if [ "$VER_MAJOR" -ge 3 ]; then
