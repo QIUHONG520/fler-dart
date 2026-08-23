@@ -529,11 +529,17 @@ VER_MAJOR=$(echo "$DART_VERSION" | cut -d. -f1)
 VER_MINOR=$(echo "$DART_VERSION" | cut -d. -f2)
 
 VERSION_DEFINES=""
-# OLD_MAP_SET_NAME: Dart 2.x only (e.g. 2.18.6) use the pre-refactor Map/Set layout.
-# (Map/Set are not dart::VM classes; kMapCid/kSetCid absent from object.h).
-# All 3.x (including 3.2.3) already have proper Map/Set VM classes.
-if [ "$VER_MAJOR" -lt 3 ]; then
+# OLD_MAP_SET_NAME: 2.18 及更早使用 pre-refactor Map/Set 布局（Map/Set 非 VM 类，
+# 用 LinkedHashMap/LinkedHashSet）。2.19 起 Map/Set 已是 VM 类（object.h 里 class Map/Set，
+# 与 3.x 一致），不再需要。
+if [ "$VER_MAJOR" -lt 2 ] || { [ "$VER_MAJOR" -eq 2 ] && [ "$VER_MINOR" -lt 19 ]; }; then
     VERSION_DEFINES="$VERSION_DEFINES -DOLD_MAP_SET_NAME=ON"
+    # OLD_MAP_NO_IMMUTABLE：这些老版本（2.14~2.17）无 immutable Map/Set CID，
+    # 需退化 ConstMap/ConstSet 为 LinkedHashMap（2.18 有 immutable，检测自动跳过）
+    DART_RAW_OBJ_H=$(find "$PACKAGES_DIR/include" -path "*/vm/raw_object.h" 2>/dev/null | head -1)
+    if [ -n "$DART_RAW_OBJ_H" ] && ! grep -q "kImmutableLinkedHashMapCid" "$DART_RAW_OBJ_H"; then
+        VERSION_DEFINES="$VERSION_DEFINES -DOLD_MAP_NO_IMMUTABLE=ON"
+    fi
 fi
 # HAS_TYPE_REF: the SDK still ships dart::TypeRef (removed later when
 # TypeParameter.bound was replaced by TypeParameter.owner). All 2.x have it.
@@ -560,17 +566,10 @@ fi
 if [ "$VER_MAJOR" -eq 2 ] && [ "$VER_MINOR" -lt 16 ]; then
     VERSION_DEFINES="$VERSION_DEFINES -DNO_INIT_LATE_STATIC_FIELD=ON"
 fi
-# 老版本 VM 兼容宏（动态检测头文件，避免硬编码版本边界）
-# blutter 源码里已有 #ifdef NO_LAST_INTERNAL_ONLY_CID / #ifdef OLD_MAP_NO_IMMUTABLE 分支
+# NO_LAST_INTERNAL_ONLY_CID：老版本（2.14~2.17）无 kLastInternalOnlyCid（DartClass.cpp 跳过 internal-only 判断）
 DART_CID_H=$(find "$PACKAGES_DIR/include" -path "*/vm/class_id.h" 2>/dev/null | head -1)
-DART_RAW_OBJ_H=$(find "$PACKAGES_DIR/include" -path "*/vm/raw_object.h" 2>/dev/null | head -1)
-# NO_LAST_INTERNAL_ONLY_CID：老版本无 kLastInternalOnlyCid（DartClass.cpp 跳过 internal-only 判断）
 if [ -n "$DART_CID_H" ] && ! grep -q "kLastInternalOnlyCid" "$DART_CID_H"; then
     VERSION_DEFINES="$VERSION_DEFINES -DNO_LAST_INTERNAL_ONLY_CID=ON"
-fi
-# OLD_MAP_NO_IMMUTABLE：老版本无 immutable Map/Set CID（pch.h 退化为 LinkedHashMap）
-if [ -n "$DART_RAW_OBJ_H" ] && ! grep -q "kImmutableLinkedHashMapCid" "$DART_RAW_OBJ_H"; then
-    VERSION_DEFINES="$VERSION_DEFINES -DOLD_MAP_NO_IMMUTABLE=ON"
 fi
 echo "Version defines: $VERSION_DEFINES"
 
