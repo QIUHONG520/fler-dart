@@ -652,7 +652,15 @@ int blutter_analyze(const char* so_path, const char* db_path, const char* out_di
         DartApp app{ so_path };
         app.EnterScope(); app.LoadInfo(); app.ExitScope();
 #ifndef NO_CODE_ANALYSIS
-        app.EnterScope(); CodeAnalyzer ca{ app }; ca.AnalyzeAll(); app.ExitScope();
+        app.EnterScope();
+        try {
+            CodeAnalyzer ca{ app }; ca.AnalyzeAll();
+        } catch (...) {
+            // CodeAnalyzer 可能因某些代码模式抛 InsnException（非 std::exception），
+            // 捕获后继续导出 LoadInfo 已恢复的类/方法（部分结果），避免整机崩溃。
+            fprintf(stderr, "fler-dart: CodeAnalyzer failed (InsnException), continuing with partial results\n");
+        }
+        app.ExitScope();
 #endif
         if (!g_db.open(db_path)) { removeDir(tmpdir); return -3; }
         createTables();
@@ -677,6 +685,9 @@ int blutter_analyze(const char* so_path, const char* db_path, const char* out_di
         g_db.close();
     } catch (std::exception& e) {
         fprintf(stderr, "fler-dart: analysis failed: %s\n", e.what());
+        removeDir(tmpdir); return -2;
+    } catch (...) {
+        fprintf(stderr, "fler-dart: analysis failed: uncaught exception (InsnException etc.)\n");
         removeDir(tmpdir); return -2;
     }
 
