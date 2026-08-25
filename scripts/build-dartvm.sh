@@ -91,6 +91,14 @@ BLUTTER_DIR="$BUILD_ROOT/blutter"
 CAPSTONE_BUILD_DIR="$BUILD_ROOT/capstone_build"
 SQLITE_DIR="$BUILD_ROOT/sqlite"
 ARCH_TAG="android_arm64"
+
+# Dart 2.x 无压缩指针概念：compressed-pointers 是 Dart 3.x 才引入的 ABI 特性。
+# 对 2.x 版本强制 no_cptr（非压缩指针），避免构建出带 compressed 标志的错误变体。
+if [[ "$DART_VERSION" == 2.* ]]; then
+    COMPRESSED_PTRS="OFF"
+    echo "  Dart 2.x detected: forcing --no-compressed-pointers"
+fi
+
 # no_cptr 变体后缀：compressed 变体无后缀，no-compressed-pointers 变体加 _no_cptr
 if [ "$COMPRESSED_PTRS" = "OFF" ]; then
     LIB_SUFFIX="_no_cptr"
@@ -495,6 +503,76 @@ else:
 PYEOF
 else
     echo "  Disassembler_arm64.h: fler-dart no_cptr 标记已存在，跳过"
+fi
+
+# ═══════════════════════════════════════════════
+# Step 1g: Patch CodeAnalyzer.cpp (per-function try/catch)
+# FunctionAnalyzer 遇到无法解析的指令序列会抛 InsnException（非 std::exception），
+# 未捕获会导致 std::terminate 整机崩溃。这里把「反汇编 + IL 分析」包进 try/catch，
+# 让单个函数解析失败时仅跳过该函数，其余函数继续分析。
+# ═══════════════════════════════════════════════
+echo ""
+echo "─── [1g] Patching CodeAnalyzer.cpp (per-function try/catch) ───"
+BLUTTER_CODEANALYZER_CPP="$BLUTTER_DIR/blutter/src/CodeAnalyzer.cpp"
+if ! grep -q "fler-dart per-fn-guard" "$BLUTTER_CODEANALYZER_CPP" 2>/dev/null; then
+    python3 - "$BLUTTER_CODEANALYZER_CPP" << 'PYEOF'
+import sys
+path = sys.argv[1]
+s = open(path, encoding='utf-8').read()
+
+if '#include <cstdio>' not in s and '#include <stdio.h>' not in s:
+    s = s.replace('#include "pch.h"', '#include "pch.h"\n#include <cstdio>', 1)
+
+# 优先按完整块匹配（反汇编 + IL 分析一起包 try）；若该提交结构有差异则回退到单行 asm2il。
+full_old = (
+    "\t\t\t\t// start from PayloadAddress or Address?\n"
+    "\t\t\t\t// the assemblies will be deleted after finish analysis because assembly with details consume too much memory\n"
+    "\t\t\t\tauto asm_insns = disasmer.Disasm((uint8_t*)dartFn->MemAddress(), dartFn->Size(), dartFn->Address());\n"
+    "\n"
+    "\t\t\t\tdartFn->SetAnalyzedData(std::make_unique<AnalyzedFnData>(app, *dartFn, convertAsm(asm_insns)));\n"
+    "\n"
+    "\t\t\t\tasm2il(dartFn, asm_insns);"
+)
+full_new = (
+    "\t\t\t\ttry {\n"
+    "\t\t\t\t\t// start from PayloadAddress or Address?\n"
+    "\t\t\t\t\t// the assemblies will be deleted after finish analysis because assembly with details consume too much memory\n"
+    "\t\t\t\t\tauto asm_insns = disasmer.Disasm((uint8_t*)dartFn->MemAddress(), dartFn->Size(), dartFn->Address());\n"
+    "\n"
+    "\t\t\t\t\tdartFn->SetAnalyzedData(std::make_unique<AnalyzedFnData>(app, *dartFn, convertAsm(asm_insns)));\n"
+    "\n"
+    "\t\t\t\t\tasm2il(dartFn, asm_insns);\n"
+    "\t\t\t\t} catch (const std::exception& e) {\n"
+    "\t\t\t\t\tfprintf(stderr, \"fler-dart: skip function (analysis error): %s\\n\", e.what());\n"
+    "\t\t\t\t} catch (...) {\n"
+    "\t\t\t\t\tfprintf(stderr, \"fler-dart: skip function (InsnException)\\n\");\n"
+    "\t\t\t\t} // fler-dart per-fn-guard"
+)
+
+single_old = "\t\t\t\tasm2il(dartFn, asm_insns);"
+single_new = (
+    "\t\t\t\ttry {\n"
+    "\t\t\t\t\tasm2il(dartFn, asm_insns);\n"
+    "\t\t\t\t} catch (const std::exception& e) {\n"
+    "\t\t\t\t\tfprintf(stderr, \"fler-dart: skip function (analysis error): %s\\n\", e.what());\n"
+    "\t\t\t\t} catch (...) {\n"
+    "\t\t\t\t\tfprintf(stderr, \"fler-dart: skip function (InsnException)\\n\");\n"
+    "\t\t\t\t} // fler-dart per-fn-guard"
+)
+
+if full_old in s:
+    s = s.replace(full_old, full_new, 1)
+    print("  CodeAnalyzer.cpp: per-function try/catch added (full block)")
+elif single_old in s:
+    s = s.replace(single_old, single_new, 1)
+    print("  CodeAnalyzer.cpp: per-function try/catch added (asm2il only)")
+else:
+    print("  WARN: CodeAnalyzer.cpp target not found, skip patch")
+
+open(path, 'w', encoding='utf-8').write(s)
+PYEOF
+else
+    echo "  CodeAnalyzer.cpp: fler-dart per-fn-guard 已存在，跳过"
 fi
 
 # ═══════════════════════════════════════════════
