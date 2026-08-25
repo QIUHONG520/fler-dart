@@ -2,7 +2,7 @@
 # ─── Build dartvm.so for Android ARM64 ───
 # Part of fler-dart: standalone dartvm.so build system for Fler.
 #
-# Pipeline (v4 — static capstone):
+# Pipeline (v5 — dual-variant engines):
 #   1. Clone Blutter (provides dartvm_fetch_build.py + C++ source)
 #   2. Patch Blutter's CMake template for NDK ARM64 cross-compile
 #   3. dartvm_fetch_build.py: sparse-checkout Dart SDK → CMake → ARM64 .a
@@ -10,7 +10,8 @@
 #   5. Compile dartvm.so (Blutter C++ + blutter_entry.cpp + SQLite)
 #      - Statically links Capstone; dynamically links libicuuc.so, libicudata.so
 #      - Uses $ORIGIN rpath for runtime shared lib resolution
-#   6. Strip → output/dartvm_<version>_android_arm64.so
+#   6. Strip → output/dartvm_<version>_android_arm64[_no_cptr].so
+#      - 双变体：compressed-pointers（默认）+ no-compressed-pointers（--no-compressed-pointers → _no_cptr 后缀）
 #
 # 说明：默认静态 capstone（USE_SHARED_CAPSTONE=OFF），dartvm.so 自带 Capstone，
 # 引擎包不再产出 libcapstone.so；capstone 已静态链接进 fler APK（SO 编辑器反汇编
@@ -22,7 +23,8 @@
 #   libc++_shared.so — NDK C++ standard library
 #
 # Usage (engine build — per Dart version):
-#   bash build-dartvm.sh --dart-version 3.12.1
+#   bash build-dartvm.sh --dart-version 3.12.1                        # compressed 变体
+#   bash build-dartvm.sh --dart-version 3.12.1 --no-compressed-pointers  # no_cptr 变体
 #
 # Usage (shared libs build — once):
 #   bash build-dartvm.sh --build-shared-libs-only
@@ -43,6 +45,8 @@ BLUTTER_COMMIT="4a60ac648bf448c5a7596437243bcd0b9376fdf0"
 # 默认静态 capstone：dartvm.so 自带 Capstone，引擎包不再产 libcapstone.so
 # （capstone 已静态进 fler APK）。--dynamic-capstone 可切回旧动态模式。
 USE_SHARED_CAPSTONE="OFF"
+# compressed-pointers 变体：默认 compressed；--no-compressed-pointers → no_cptr
+COMPRESSED_PTRS="ON"
 BUILD_SHARED_LIBS_ONLY="0"
 PREBUILT_SHARED_LIBS_DIR=""
 
@@ -57,6 +61,7 @@ while [[ $# -gt 0 ]]; do
         --dynamic-capstone) USE_SHARED_CAPSTONE="ON"; shift ;;
         --build-shared-libs-only) BUILD_SHARED_LIBS_ONLY="1"; shift ;;
         --prebuilt-shared-libs-dir) PREBUILT_SHARED_LIBS_DIR="$2"; shift 2 ;;
+        --no-compressed-pointers) COMPRESSED_PTRS="OFF"; shift ;;
         *) echo "ERROR: Unknown $1"; exit 1 ;;
     esac
 done
@@ -84,9 +89,15 @@ fi
 
 BLUTTER_DIR="$BUILD_ROOT/blutter"
 CAPSTONE_BUILD_DIR="$BUILD_ROOT/capstone_build"
-DARTVM_SO_BUILD_DIR="$BUILD_ROOT/dartvm_so_build"
 SQLITE_DIR="$BUILD_ROOT/sqlite"
 ARCH_TAG="android_arm64"
+# no_cptr 变体后缀：compressed 变体无后缀，no-compressed-pointers 变体加 _no_cptr
+if [ "$COMPRESSED_PTRS" = "OFF" ]; then
+    LIB_SUFFIX="_no_cptr"
+else
+    LIB_SUFFIX=""
+fi
+DARTVM_SO_BUILD_DIR="$BUILD_ROOT/dartvm_so_build${LIB_SUFFIX}"
 
 # Shared libs output (built once, reused)
 SHARED_LIBS_OUT="$OUTPUT_DIR/shared_libs"
@@ -397,6 +408,18 @@ new = ("    # fler-dart NDK injected\n"
 
 assert old in c, "Pattern not found in dartvm_fetch_build.py"
 c = c.replace(old, new)
+
+# 2. lib_name 加 compressed 后缀（no_cptr 变体用独立 .a 目录，避免与 compressed 互相覆盖）
+c = c.replace(
+    "        self.lib_name = f'dartvm{version}_{os_name}_{arch}'",
+    "        _suffix = '' if self.has_compressed_ptrs else '_no_cptr'\n        self.lib_name = f'dartvm{version}_{os_name}_{arch}{_suffix}'"
+)
+# 3. __main__ 从环境变量 DART_NO_COMPRESSED_PTRS 读 compressed 配置
+c = c.replace(
+    "    info = DartLibInfo(ver, os_name, arch, snapshot_hash=snapshot_hash)",
+    "    _has_cptr = None\n    if os.environ.get('DART_NO_COMPRESSED_PTRS') == '1':\n        _has_cptr = False\n    info = DartLibInfo(ver, os_name, arch, has_compressed_ptrs=_has_cptr, snapshot_hash=snapshot_hash)"
+)
+
 print("  dartvm_fetch_build.py: patched OK")
 with open(fetch_file, 'w') as f:
     f.write(c)
@@ -457,7 +480,7 @@ export FLER_NDK="$NDK_PATH"
 
 # Determine snapshot hash from installed packages for cache key
 SNAPSHOT_HASH=""
-DARMVM_LIB_NAME="dartvm${DART_VERSION}_android_arm64"
+DARMVM_LIB_NAME="dartvm${DART_VERSION}_android_arm64${LIB_SUFFIX}"
 PACKAGES_DIR="$BLUTTER_DIR/packages"
 PACKAGES_LIB="$PACKAGES_DIR/lib/$DARMVM_LIB_NAME/lib$DARMVM_LIB_NAME.a"
 
@@ -490,6 +513,9 @@ if [ -f "$PACKAGES_LIB" ]; then
     rm -f "$PACKAGES_DIR/lib/$DARMVM_LIB_NAME"/*.a
 fi
 
+if [ "$COMPRESSED_PTRS" = "OFF" ]; then
+    export DART_NO_COMPRESSED_PTRS=1
+fi
 python3 dartvm_fetch_build.py "$DART_VERSION" android arm64
 
     DARTVM_LIB=$(find "$PACKAGES_DIR/lib" -name "*.a" 2>/dev/null | head -1 || true)
@@ -728,13 +754,14 @@ cmake -G Ninja \
     -DUSE_SHARED_CAPSTONE="$USE_SHARED_CAPSTONE" \
     -DSQLITE_DIR="$SQLITE_DIR" \
     -DICU_DIR="$ICU_DIR" \
+    -DNO_COMPRESSED_POINTERS="$([ "$COMPRESSED_PTRS" = "OFF" ] && echo ON || echo OFF)" \
     $VERSION_DEFINES \
     "$REPO_DIR/dartvm"
 
 cmake --build . -j "$JOBS"
 
 # ─── Output ───
-OUTPUT_FILE="$OUTPUT_DIR/dartvm_${DART_VERSION}_${ARCH_TAG}.so"
+OUTPUT_FILE="$OUTPUT_DIR/dartvm_${DART_VERSION}_${ARCH_TAG}${LIB_SUFFIX}.so"
 mkdir -p "$OUTPUT_DIR"
 cp "$DARTVM_SO_BUILD_DIR/libdartvm.so" "$OUTPUT_FILE"
 
