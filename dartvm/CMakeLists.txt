@@ -136,7 +136,6 @@ endif()
 #   - U_USING_ICU_NAMESPACE=0：与宿主 blutter 完全一致的 ICU 命名空间定义。
 target_compile_definitions(dartvm PRIVATE
     DART_VERSION="${DART_VERSION}"
-    DART_COMPRESSED_POINTERS
     DART_PRECOMPILED_RUNTIME
     DART_TARGET_OS_ANDROID
     TARGET_ARCH_ARM64
@@ -148,6 +147,12 @@ target_compile_definitions(dartvm PRIVATE
     NDEBUG
     FRIDA_TEMPLATE_DIR="${BLUTTER_SRC_DIR}/../scripts"
 )
+
+# compressed-pointers 变体：默认定义 DART_COMPRESSED_POINTERS；
+# build-dartvm.sh 传 -DNO_COMPRESSED_POINTERS=ON（--no-compressed-pointers）时不定义
+if(NOT NO_COMPRESSED_POINTERS)
+    target_compile_definitions(dartvm PRIVATE DART_COMPRESSED_POINTERS)
+endif()
 
 # Version-specific defines
 if(OLD_MAP_SET_NAME)
