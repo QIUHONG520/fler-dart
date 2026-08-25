@@ -465,6 +465,39 @@ PYEOF
 cp "$REPO_DIR/dartvm/src/atomic_ref_compat.h" "$BLUTTER_DIR/" 2>/dev/null || true
 
 # ═══════════════════════════════════════════════
+# Step 1f: Patch Disassembler_arm64.h (CSREG_DART_HEAP no_cptr 占位)
+# blutter 的 CodeAnalyzer_arm64.cpp 无条件引用 CSREG_DART_HEAP（解压指针寄存器），
+# 但该常量仅在 DART_COMPRESSED_POINTERS 下定义；no_cptr 变体编译会报 undeclared。
+# 给 no_cptr 加占位定义（解压指针指令序列仅在 compressed 模式生成，占位值不会触发）。
+# ═══════════════════════════════════════════════
+echo ""
+echo "─── [1f] Patching Disassembler_arm64.h (CSREG_DART_HEAP no_cptr fallback) ───"
+
+BLUTTER_DISASM_H="$BLUTTER_DIR/blutter/src/Disassembler_arm64.h"
+if ! grep -q "fler-dart no_cptr" "$BLUTTER_DISASM_H" 2>/dev/null; then
+    python3 - "$BLUTTER_DISASM_H" << 'PYEOF'
+import sys
+path = sys.argv[1]
+s = open(path, encoding='utf-8').read()
+old = "#if defined(DART_COMPRESSED_POINTERS)\nconstexpr arm64_reg CSREG_DART_HEAP = ToCapstoneReg(dart::HEAP_BITS);\n#endif"
+new = ("#if defined(DART_COMPRESSED_POINTERS)\n"
+       "constexpr arm64_reg CSREG_DART_HEAP = ToCapstoneReg(dart::HEAP_BITS);\n"
+       "#else\n"
+       "// fler-dart no_cptr: 占位定义（解压指针路径仅在 compressed 模式触发）\n"
+       "constexpr arm64_reg CSREG_DART_HEAP = ToCapstoneReg(dart::TMP);\n"
+       "#endif")
+if old not in s:
+    print("  WARN: Disassembler_arm64.h CSREG_DART_HEAP 块未找到，跳过 patch")
+else:
+    s = s.replace(old, new, 1)
+    open(path, 'w', encoding='utf-8').write(s)
+    print("  Disassembler_arm64.h: no_cptr 占位已加")
+PYEOF
+else
+    echo "  Disassembler_arm64.h: fler-dart no_cptr 标记已存在，跳过"
+fi
+
+# ═══════════════════════════════════════════════
 # Step 2: Run dartvm_fetch_build.py (with NDK env)
 # ═══════════════════════════════════════════════
 echo ""
