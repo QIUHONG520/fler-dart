@@ -659,6 +659,38 @@ else
 fi
 
 # ═══════════════════════════════════════════════
+# Step 1i: Patch CodeAnalyzer_arm64.cpp (FATAL → InsnException)
+# FunctionAnalyzer 里某些无法解析的指令序列用 FATAL()（Dart VM 宏，abort 整机崩溃）。
+# 改为抛 InsnException，让外层 per-function try/catch 跳过该函数，而不是 SIGABRT。
+# ═══════════════════════════════════════════════
+echo ""
+echo "─── [1i] Patching CodeAnalyzer_arm64.cpp (FATAL → InsnException) ───"
+BLUTTER_CODEANALYZER_ARM64="$BLUTTER_DIR/blutter/src/CodeAnalyzer_arm64.cpp"
+if ! grep -q "fler-dart fatal-guard" "$BLUTTER_CODEANALYZER_ARM64" 2>/dev/null; then
+    python3 - "$BLUTTER_CODEANALYZER_ARM64" << 'PYEOF'
+import sys
+path = sys.argv[1]
+s = open(path, encoding='utf-8').read()
+
+replacements = [
+    ('FATAL("add from NULL_REG");', 'throw InsnException("add from NULL_REG", insn);'),
+    ('FATAL("unexpected instruction");', 'throw InsnException("unexpected instruction", insn);'),
+    ('FATAL("static field without STR or LDR");', 'throw InsnException("static field without STR or LDR", insn); // fler-dart fatal-guard'),
+]
+count = 0
+for old, new in replacements:
+    if old in s:
+        s = s.replace(old, new, 1)
+        count += 1
+
+open(path, 'w', encoding='utf-8').write(s)
+print(f"  CodeAnalyzer_arm64.cpp: {count} FATAL -> InsnException")
+PYEOF
+else
+    echo "  CodeAnalyzer_arm64.cpp: fler-dart fatal-guard 已存在，跳过"
+fi
+
+# ═══════════════════════════════════════════════
 # Step 2: Run dartvm_fetch_build.py (with NDK env)
 # ═══════════════════════════════════════════════
 echo ""
