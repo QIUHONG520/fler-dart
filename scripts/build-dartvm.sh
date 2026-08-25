@@ -576,6 +576,89 @@ else
 fi
 
 # ═══════════════════════════════════════════════
+# Step 1h: Patch DartLoader.cpp (VM 初始化幂等 + 复用)
+# Dart_SetVMFlags / Dart_Initialize 每个进程只能调用一次。终端 blutter 每个进程只分析一次，
+# 但 App 内会连续分析多个 APK，导致第二次分析抛 "Flags already set"。
+# 这里让 VM 初始化只做一次、Unload 时不再 Dart_Cleanup，同一进程内可反复分析。
+# ═══════════════════════════════════════════════
+echo ""
+echo "─── [1h] Patching DartLoader.cpp (VM init idempotent) ───"
+BLUTTER_DARTLOADER_CPP="$BLUTTER_DIR/blutter/src/DartLoader.cpp"
+if ! grep -q "fler-dart vm-reuse" "$BLUTTER_DARTLOADER_CPP" 2>/dev/null; then
+    python3 - "$BLUTTER_DARTLOADER_CPP" << 'PYEOF'
+import sys
+path = sys.argv[1]
+s = open(path, encoding='utf-8').read()
+
+# 1) Load 内 VM 初始化只做一次
+old_load = (
+    "Dart_Isolate DartLoader::Load(LibAppInfo& libInfo)\n"
+    "{\n"
+    "\tinit_vm_flags();\n"
+    "\n"
+    "\tinit_dart(libInfo.vm_snapshot_data, libInfo.vm_snapshot_instructions);\n"
+    "\n"
+    "\tauto isolate = load_isolate(libInfo.isolate_snapshot_data, libInfo.isolate_snapshot_instructions);\n"
+    "\n"
+    "\treturn isolate;\n"
+    "}"
+)
+new_load = (
+    "Dart_Isolate DartLoader::Load(LibAppInfo& libInfo)\n"
+    "{\n"
+    "\t// fler-dart vm-reuse: Dart_SetVMFlags / Dart_Initialize 仅首次调用\n"
+    "\tstatic bool vm_initialized = false;\n"
+    "\tif (!vm_initialized) {\n"
+    "\t\tinit_vm_flags();\n"
+    "\t\tinit_dart(libInfo.vm_snapshot_data, libInfo.vm_snapshot_instructions);\n"
+    "\t\tvm_initialized = true;\n"
+    "\t}\n"
+    "\n"
+    "\tauto isolate = load_isolate(libInfo.isolate_snapshot_data, libInfo.isolate_snapshot_instructions);\n"
+    "\n"
+    "\treturn isolate;\n"
+    "}"
+)
+
+# 2) Unload 不再清理 VM
+old_unload = (
+    "void DartLoader::Unload()\n"
+    "{\n"
+    "\tif (Dart_CurrentIsolate() != nullptr) {\n"
+    "\t\tDart_ShutdownIsolate();\n"
+    "\t}\n"
+    "\tignore_result(Dart_Cleanup());\n"
+    "}"
+)
+new_unload = (
+    "void DartLoader::Unload()\n"
+    "{\n"
+    "\tif (Dart_CurrentIsolate() != nullptr) {\n"
+    "\t\tDart_ShutdownIsolate();\n"
+    "\t}\n"
+    "\t// fler-dart vm-reuse: 不调用 Dart_Cleanup，保留 VM 供同进程内重复分析\n"
+    "}"
+)
+
+if old_load not in s:
+    print("  WARN: DartLoader::Load 目标块未找到，跳过 Load patch")
+else:
+    s = s.replace(old_load, new_load, 1)
+    print("  DartLoader::Load: VM 初始化幂等已加")
+
+if old_unload not in s:
+    print("  WARN: DartLoader::Unload 目标块未找到，跳过 Unload patch")
+else:
+    s = s.replace(old_unload, new_unload, 1)
+    print("  DartLoader::Unload: 保留 VM 已加")
+
+open(path, 'w', encoding='utf-8').write(s)
+PYEOF
+else
+    echo "  DartLoader.cpp: fler-dart vm-reuse 已存在，跳过"
+fi
+
+# ═══════════════════════════════════════════════
 # Step 2: Run dartvm_fetch_build.py (with NDK env)
 # ═══════════════════════════════════════════════
 echo ""
