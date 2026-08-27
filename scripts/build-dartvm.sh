@@ -659,92 +659,35 @@ else
 fi
 
 # ═══════════════════════════════════════════════
-# Step 1i: Patch CodeAnalyzer_arm64.cpp (FATAL/ASSERT → InsnException)
-# FunctionAnalyzer 里某些无法解析的指令序列用 FATAL()（Dart VM 宏，abort 整机崩溃）
-# 或 ASSERT 断言（debug 模式触发）。改为抛 InsnException，让外层 per-function try/catch
-# 跳过该函数，而不是 SIGABRT。增强版：覆盖 Dart 3.6.0 常见错误（line 524/555/431 等）。
+# Step 1i: Patch CodeAnalyzer_arm64.cpp (FATAL → InsnException)
+# FunctionAnalyzer 里某些无法解析的指令序列用 FATAL()（Dart VM 宏，abort 整机崩溃）。
+# 改为抛 InsnException，让外层 per-function try/catch 跳过该函数，而不是 SIGABRT。
 # ═══════════════════════════════════════════════
 echo ""
-echo "─── [1i] Patching CodeAnalyzer_arm64.cpp (enhanced FATAL/ASSERT → InsnException) ───"
+echo "─── [1i] Patching CodeAnalyzer_arm64.cpp (FATAL → InsnException) ───"
 BLUTTER_CODEANALYZER_ARM64="$BLUTTER_DIR/blutter/src/CodeAnalyzer_arm64.cpp"
-if ! grep -q "fler-dart fatal-guard-v2" "$BLUTTER_CODEANALYZER_ARM64" 2>/dev/null; then
+if ! grep -q "fler-dart fatal-guard" "$BLUTTER_CODEANALYZER_ARM64" 2>/dev/null; then
     python3 - "$BLUTTER_CODEANALYZER_ARM64" << 'PYEOF'
 import sys
-import re
 path = sys.argv[1]
 s = open(path, encoding='utf-8').read()
 
-# 精确替换规则（按优先级排序，避免重复替换）
 replacements = [
-    # === 原有 3 处 FATAL ===
     ('FATAL("add from NULL_REG");', 'throw InsnException("add from NULL_REG", insn);'),
     ('FATAL("unexpected instruction");', 'throw InsnException("unexpected instruction", insn);'),
-    ('FATAL("static field without STR or LDR");', 'throw InsnException("static field without STR or LDR", insn); // fler-dart fatal-guard-v2'),
-    
-    # === Dart 3.6.0 高频错误 ===
-    # line 524: processLeaveFrameInstr
-    ('ASSERT(fnInfo->useFramePointer);', 
-     'if (!fnInfo->useFramePointer) throw InsnException("expected useFramePointer", insn);'),
-    
-    # line 555: processCheckStackOverflowInstr
-    ('ASSERT(insn.id() == ARM64_INS_CMP);', 
-     'if (insn.id() != ARM64_INS_CMP) throw InsnException("expected ARM64_INS_CMP", insn);'),
-    
-    # line 560: processCheckStackOverflowInstr
-    ('ASSERT(insn.id() == ARM64_INS_B);', 
-     'if (insn.id() != ARM64_INS_B) throw InsnException("expected ARM64_INS_B", insn);'),
-    
-    # line 431/422/416: getObjectPoolInstruction
-    ('ASSERT(false);', 
-     'throw InsnException("assertion failed", insn);'),
-    
-    # line 2886/2918/2942: processBoxInt64Instr
-    ('ASSERT(insn.id() == ARM64_INS_B && insn.cc() == ARM64_CC_EQ);', 
-     'if (!(insn.id() == ARM64_INS_B && insn.cc() == ARM64_CC_EQ)) throw InsnException("expected B.EQ", insn);'),
-    ('ASSERT(objPoolInstr.IsSet());', 
-     'if (!objPoolInstr.IsSet()) throw InsnException("objPoolInstr not set", insn);'),
-    ('ASSERT(insn.id() == ARM64_INS_STUR);', 
-     'if (insn.id() != ARM64_INS_STUR) throw InsnException("expected ARM64_INS_STUR", insn);'),
-    
-    # line 3031/3102: processLoadFieldTableInstr
-    ('ASSERT(insn.address() == cont_addr);', 
-     'if (insn.address() != cont_addr) throw InsnException("address mismatch", insn);'),
-    
-    # line 3276/3283/3289/3320: processWriteBarrierInstr
-    ('ASSERT(insn.id() == ARM64_INS_AND);', 
-     'if (insn.id() != ARM64_INS_AND) throw InsnException("expected ARM64_INS_AND", insn);'),
-    ('ASSERT(insn.id() == ARM64_INS_TST);', 
-     'if (insn.id() != ARM64_INS_TST) throw InsnException("expected ARM64_INS_TST", insn);'),
-    ('ASSERT(insn.id() == ARM64_INS_LDR);', 
-     'if (insn.id() != ARM64_INS_LDR) throw InsnException("expected ARM64_INS_LDR", insn);'),
-    
-    # line 3482: processLoadStore
-    ('ASSERT(il_wb);', 
-     'if (!il_wb) throw InsnException("il_wb not set", insn);'),
-    
-    # line 2805: processLoadClassIdInstr
-    ('ASSERT(insn.id() == ARM64_INS_UBFX);', 
-     'if (insn.id() != ARM64_INS_UBFX) throw InsnException("expected ARM64_INS_UBFX", insn);'),
-    
-    # getObjectPoolInstruction 多个分支
-    ('ASSERT(insn.ops(2).type == ARM64_OP_IMM);', 
-     'if (insn.ops(2).type != ARM64_OP_IMM) throw InsnException("expected ARM64_OP_IMM", insn);'),
-    ('ASSERT(insn.ops(2).mem.base == offset_reg);', 
-     'if (insn.ops(2).mem.base != offset_reg) throw InsnException("mem.base mismatch", insn);'),
+    ('FATAL("static field without STR or LDR");', 'throw InsnException("static field without STR or LDR", insn); // fler-dart fatal-guard'),
 ]
-
 count = 0
 for old, new in replacements:
-    occurrences = s.count(old)
-    if occurrences > 0:
-        s = s.replace(old, new)
-        count += occurrences
+    if old in s:
+        s = s.replace(old, new, 1)
+        count += 1
 
 open(path, 'w', encoding='utf-8').write(s)
-print(f"  CodeAnalyzer_arm64.cpp: {count} FATAL/ASSERT -> InsnException (enhanced v2)")
+print(f"  CodeAnalyzer_arm64.cpp: {count} FATAL -> InsnException")
 PYEOF
 else
-    echo "  CodeAnalyzer_arm64.cpp: fler-dart fatal-guard-v2 已存在，跳过"
+    echo "  CodeAnalyzer_arm64.cpp: fler-dart fatal-guard 已存在，跳过"
 fi
 
 # ═══════════════════════════════════════════════
