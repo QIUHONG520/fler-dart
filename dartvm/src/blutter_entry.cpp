@@ -33,8 +33,6 @@
 #include "DartThreadInfo.h"
 #include "FridaWriter.h"
 
-#include "dart_api.h"
-
 #include "sqlite3.h"
 
 namespace fs = std::filesystem;
