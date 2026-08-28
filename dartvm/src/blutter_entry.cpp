@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <cinttypes>
 #include <filesystem>
+#include <unordered_map>
 
 #include <unistd.h>
 #include <sys/stat.h>
@@ -82,7 +83,8 @@ static void createTables() {
         "  name TEXT NOT NULL,"
         "  address INTEGER NOT NULL,"
         "  size INTEGER,"
-        "  src_code TEXT"
+        "  src_code TEXT,"
+        "  UNIQUE(class_id, address)"
         ")"
     );
     g_db.exec(
@@ -106,8 +108,7 @@ static void createTables() {
         "CREATE TABLE IF NOT EXISTS pp_entries ("
         "  pp_offset INTEGER PRIMARY KEY,"
         "  type TEXT NOT NULL,"
-        "  value TEXT,"
-        "  so_addr INTEGER"
+        "  value TEXT"
         ")"
     );
     g_db.exec(
@@ -119,20 +120,17 @@ static void createTables() {
     );
     g_db.exec(
         "CREATE TABLE IF NOT EXISTS objs ("
-        "  analysis_id INTEGER NOT NULL,"
-        "  obj_address INTEGER NOT NULL,"
+        "  obj_address INTEGER NOT NULL PRIMARY KEY,"
         "  class_name TEXT,"
-        "  field_hint TEXT,"
-        "  PRIMARY KEY (analysis_id, obj_address)"
+        "  field_hint TEXT"
         ")"
     );
     g_db.exec(
         "CREATE TABLE IF NOT EXISTS enum_map ("
-        "  analysis_id INTEGER NOT NULL,"
         "  class_name TEXT NOT NULL,"
         "  enum_index INTEGER NOT NULL,"
         "  enum_name TEXT NOT NULL,"
-        "  PRIMARY KEY (analysis_id, class_name, enum_index)"
+        "  PRIMARY KEY (class_name, enum_index)"
         ")"
     );
 }
@@ -308,7 +306,7 @@ static std::string buildObjFieldHint(const std::string& dump) {
 
 // 从 dump 文本检测枚举：Super!_Enum : { off_8: int(0x..), off_10: "name" }
 static void extractEnumMap(const std::string& dump, const std::string& clsName,
-                           sqlite3* db, int64_t analysisId) {
+                           sqlite3* db) {
     if (dump.find("_Enum") == std::string::npos) return;
     // 找 off_8: int(0x..) 与 off_10: "name" 形态
     size_t idx8 = dump.find("off_8: int(0x");
@@ -332,19 +330,18 @@ static void extractEnumMap(const std::string& dump, const std::string& clsName,
     if (name.empty()) return;
     sqlite3_stmt* st = nullptr;
     if (sqlite3_prepare_v2(db,
-        "INSERT OR IGNORE INTO enum_map (analysis_id, class_name, enum_index, enum_name) VALUES (?,?,?,?)",
+        "INSERT OR IGNORE INTO enum_map (class_name, enum_index, enum_name) VALUES (?,?,?)",
         -1, &st, nullptr) == SQLITE_OK) {
-        sqlite3_bind_int64(st, 1, analysisId);
-        sqlite3_bind_text(st, 2, clsName.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(st, 3, index);
-        sqlite3_bind_text(st, 4, name.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, 1, clsName.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(st, 2, index);
+        sqlite3_bind_text(st, 3, name.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_step(st);
     }
     sqlite3_finalize(st);
 }
 
 // 导出 classes + methods（直接遍历 DartApp 内存结构）
-static void exportClassesAndMethods(DartApp& app, DartDumper& dumper, int64_t analysisId) {
+static void exportClassesAndMethods(DartApp& app, DartDumper& dumper) {
     const auto& libs = app.fler_libs();
     int classes = 0, methods = 0;
     g_db.exec("BEGIN TRANSACTION");
@@ -390,7 +387,7 @@ static void exportClassesAndMethods(DartApp& app, DartDumper& dumper, int64_t an
                 const std::string mname = buildFunctionName(fn, cls);
                 sqlite3_stmt* st = nullptr;
                 if (sqlite3_prepare_v2(g_db.db,
-                    "INSERT INTO methods (class_id, name, address, size, src_code) VALUES (?,?,?,?,?)",
+                    "INSERT OR IGNORE INTO methods (class_id, name, address, size, src_code) VALUES (?,?,?,?,?)",
                     -1, &st, nullptr) == SQLITE_OK) {
                     sqlite3_bind_int64(st, 1, (int64_t)cls->Id());
                     sqlite3_bind_text(st, 2, mname.c_str(), -1, SQLITE_TRANSIENT);
@@ -451,7 +448,7 @@ static void exportAsmBlocks(DartApp& app, DartDumper& dumper) {
 // 注意：必须用 simpleForm=false（与标准 Blutter DumpObjectPool 一致），
 // 才能得到 "[pp+0x58] String: "..." / "List<qCb>(3) [Obj!...]" 完整格式，
 // 且填充 knownObjectPtrs（供后续 DumpObjects 产出完整 objs.txt）。
-static void exportObjectPool(DartApp& app, DartDumper& dumper, int64_t analysisId) {
+static void exportObjectPool(DartApp& app, DartDumper& dumper) {
     const auto& pool = app.GetObjectPool();
     intptr_t num = pool.Length();
     int pp = 0, strings = 0;
@@ -464,10 +461,16 @@ static void exportObjectPool(DartApp& app, DartDumper& dumper, int64_t analysisI
 
         // 拆分 type / value（"Type: value" 形式）
         // desc 形如 "[pp+0x58] String: "内容"" / "[pp+0x40] List(5) [..]" / "[pp+0x10] Stub: X (0x..)"
+        // type 提取纯类型名（去掉 "[pp+0xNN] " 前缀），pp_offset 字段已单独记录偏移。
         std::string type, value;
         auto pos = desc.find(": ");
         if (pos != std::string::npos && pos > 0) {
-            type = desc.substr(0, pos);
+            std::string head = desc.substr(0, pos);  // "[pp+0x58] String"
+            if (!head.empty() && head.front() == '[') {
+                auto sp = head.find("] ");
+                if (sp != std::string::npos) head = head.substr(sp + 2);
+            }
+            type = head;
             value = desc.substr(pos + 2);
         } else {
             type = "";
@@ -515,11 +518,85 @@ static void exportObjectPool(DartApp& app, DartDumper& dumper, int64_t analysisI
     fprintf(stderr, "fler-dart: exported %d pp entries, %d strings\n", pp, strings);
 }
 
+// 导出 string_refs（字符串→方法交叉引用）+ 回填 strings.ref_count。
+// 依赖 exportObjectPool 已填充 strings 表（pp_offset 唯一）。
+// 遍历每个方法的 AnalyzedData，收集 AsmText::PoolOffset 引用的对象池 offset；
+// 若该 offset 命中 strings 表（即引用的是字符串），建立 (string_id, method_address)
+// 关联（PRIMARY KEY 去重），最后把 ref_count 更新为引用该字符串的方法数。
+static void exportStringRefs(DartApp& app) {
+    // 1. 读 strings 表，构建 pp_offset -> string_id 映射
+    std::unordered_map<intptr_t, int64_t> strIdByOffset;
+    {
+        sqlite3_stmt* st = nullptr;
+        if (sqlite3_prepare_v2(g_db.db, "SELECT id, pp_offset FROM strings",
+                               -1, &st, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(st) == SQLITE_ROW) {
+                strIdByOffset[(intptr_t)sqlite3_column_int64(st, 1)] =
+                    sqlite3_column_int64(st, 0);
+            }
+        }
+        sqlite3_finalize(st);
+    }
+    if (strIdByOffset.empty()) return;
+
+    // 2. 遍历方法，收集 PoolOffset 引用并写 string_refs
+    const auto& libs = app.fler_libs();
+    g_db.exec("BEGIN TRANSACTION");
+    for (auto* lib : libs) {
+        if (!lib) continue;
+        for (auto* cls : lib->classes) {
+            if (!cls) continue;
+            for (auto* fn : cls->Functions()) {
+                if (!fn) continue;
+                auto* data = fn->GetAnalyzedData();
+                if (!data) continue;
+                const auto& asmTexts = data->asmTexts.Data();
+                for (const auto& t : asmTexts) {
+                    if (t.dataType != AsmText::PoolOffset) continue;
+                    auto it = strIdByOffset.find((intptr_t)t.poolOffset);
+                    if (it == strIdByOffset.end()) continue;
+                    sqlite3_stmt* s = nullptr;
+                    if (sqlite3_prepare_v2(g_db.db,
+                        "INSERT OR IGNORE INTO string_refs (string_id, method_address) VALUES (?,?)",
+                        -1, &s, nullptr) == SQLITE_OK) {
+                        sqlite3_bind_int64(s, 1, it->second);
+                        sqlite3_bind_int64(s, 2, (int64_t)fn->Address());
+                        sqlite3_step(s);
+                    }
+                    sqlite3_finalize(s);
+                }
+            }
+        }
+    }
+    g_db.exec("COMMIT");
+
+    // 3. 回填 ref_count = 引用该字符串的（去重）方法数
+    g_db.exec(
+        "UPDATE strings SET ref_count = ("
+        "  SELECT COUNT(*) FROM string_refs WHERE string_refs.string_id = strings.id"
+        ")"
+    );
+
+    // 统计实际关联数
+    int totalRefs = 0;
+    {
+        sqlite3_stmt* st = nullptr;
+        if (sqlite3_prepare_v2(g_db.db, "SELECT COUNT(*) FROM string_refs",
+                               -1, &st, nullptr) == SQLITE_OK) {
+            if (sqlite3_step(st) == SQLITE_ROW)
+                totalRefs = (int)sqlite3_column_int64(st, 0);
+        }
+        sqlite3_finalize(st);
+    }
+    fprintf(stderr, "fler-dart: exported %d string refs (distinct), ref_count updated\n",
+            totalRefs);
+}
+
 // 导出 objs 轻量索引 + enum_map（对象堆 dump 的摘要）
 // 依赖：exportProducts 已调用 DumpObjects 产出 objs.txt（knownObjectPtrs 由
 // exportObjectPool(simpleForm=false) 填充）。本函数解析 objs.txt 文本入库，
 // 保证索引与落地产物完全一致。
-static void exportObjsIndex(const std::string& objsPath, int64_t analysisId) {
+static void exportObjsIndex(const std::string& objsPath) {
     std::ifstream in(objsPath);
     if (!in) {
         fprintf(stderr, "fler-dart: cannot open objs.txt: %s\n", objsPath.c_str());
@@ -552,17 +629,16 @@ static void exportObjsIndex(const std::string& objsPath, int64_t analysisId) {
             std::string hint = buildObjFieldHint(dump);
             sqlite3_stmt* st = nullptr;
             if (sqlite3_prepare_v2(g_db.db,
-                "INSERT OR IGNORE INTO objs (analysis_id, obj_address, class_name, field_hint) VALUES (?,?,?,?)",
+                "INSERT OR IGNORE INTO objs (obj_address, class_name, field_hint) VALUES (?,?,?)",
                 -1, &st, nullptr) == SQLITE_OK) {
-                sqlite3_bind_int64(st, 1, analysisId);
-                sqlite3_bind_int64(st, 2, addr);
-                sqlite3_bind_text(st, 3, clsName.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(st, 4, hint.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int64(st, 1, addr);
+                sqlite3_bind_text(st, 2, clsName.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(st, 3, hint.c_str(), -1, SQLITE_TRANSIENT);
                 sqlite3_step(st);
             }
             sqlite3_finalize(st);
             objs++;
-            extractEnumMap(dump, clsName, g_db.db, analysisId);
+            extractEnumMap(dump, clsName, g_db.db);
             dump.clear();
         } else if (!dump.empty()) {
             // 理论上不会到这（上面已消费到空行）
@@ -611,10 +687,27 @@ static void exportProducts(DartApp& app, DartDumper& dumper, const std::string& 
 
 // ─── Temp dir helpers ──────────────────────────
 static bool createTempDir(char* buf, size_t sz) {
+    // Priority: TMPDIR > TEMP > TMP > /data/local/tmp > /tmp
+    // Android app has no write permission for /data/local/tmp and /tmp.
+    // App should setenv("TMPDIR", app_cache_dir) before calling blutter_analyze.
+    const char* env_dirs[] = {
+        getenv("TMPDIR"),
+        getenv("TEMP"),
+        getenv("TMP"),
+    };
+    for (const char* d : env_dirs) {
+        if (d == nullptr || d[0] == '\0') continue;
+        size_t need = strlen(d) + 1 + 12 + 1;  // dir + "/" + "fler_XXXXXX" + "\0"
+        if (need > sz) continue;
+        snprintf(buf, sz, "%s/fler_XXXXXX", d);
+        if (mkdtemp(buf) != nullptr) return true;
+    }
+    // fallback 1: /data/local/tmp (root device or classic Android)
     const char* tmpl = "/data/local/tmp/fler_XXXXXX";
     if (sz < strlen(tmpl) + 1) return false;
     strncpy(buf, tmpl, sz);
     if (mkdtemp(buf) == nullptr) {
+        // fallback 2: /tmp
         const char* alt = "/tmp/fler_XXXXXX";
         strncpy(buf, alt, sz);
         if (mkdtemp(buf) == nullptr) return false;
@@ -668,16 +761,18 @@ int blutter_analyze(const char* so_path, const char* db_path, const char* out_di
         app.EnterScope();
         {
             DartDumper dumper{ app };
-            exportClassesAndMethods(app, dumper, 0);
+            exportClassesAndMethods(app, dumper);
             // 独立表：标准 DumpCode 格式完整反汇编存档（与 asm/*.dart 一致）
             exportAsmBlocks(app, dumper);
             // simpleForm=false：恢复标准描述格式 + 填充 knownObjectPtrs
-            exportObjectPool(app, dumper, 0);
+            exportObjectPool(app, dumper);
+            // 字符串→方法交叉引用 + ref_count（依赖 strings 表已填充）
+            exportStringRefs(app);
             // 落地全部标准产物
             std::string od = out_dir ? out_dir : "";
             if (!od.empty()) {
                 exportProducts(app, dumper, od);
-                exportObjsIndex(od + "/objs.txt", 0);
+                exportObjsIndex(od + "/objs.txt");
             }
         }
         app.ExitScope();
