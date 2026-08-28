@@ -2,7 +2,7 @@
 # ─── Build dartvm.so for Android ARM64 ───
 # Part of fler-dart: standalone dartvm.so build system for Fler.
 #
-# Pipeline (v5 — dual-variant engines):
+# Pipeline (v4 — static capstone):
 #   1. Clone Blutter (provides dartvm_fetch_build.py + C++ source)
 #   2. Patch Blutter's CMake template for NDK ARM64 cross-compile
 #   3. dartvm_fetch_build.py: sparse-checkout Dart SDK → CMake → ARM64 .a
@@ -10,8 +10,7 @@
 #   5. Compile dartvm.so (Blutter C++ + blutter_entry.cpp + SQLite)
 #      - Statically links Capstone; dynamically links libicuuc.so, libicudata.so
 #      - Uses $ORIGIN rpath for runtime shared lib resolution
-#   6. Strip → output/dartvm_<version>_android_arm64[_no_cptr].so
-#      - 双变体：compressed-pointers（默认）+ no-compressed-pointers（--no-compressed-pointers → _no_cptr 后缀）
+#   6. Strip → output/dartvm_<version>_android_arm64.so
 #
 # 说明：默认静态 capstone（USE_SHARED_CAPSTONE=OFF），dartvm.so 自带 Capstone，
 # 引擎包不再产出 libcapstone.so；capstone 已静态链接进 fler APK（SO 编辑器反汇编
@@ -23,8 +22,7 @@
 #   libc++_shared.so — NDK C++ standard library
 #
 # Usage (engine build — per Dart version):
-#   bash build-dartvm.sh --dart-version 3.12.1                        # compressed 变体
-#   bash build-dartvm.sh --dart-version 3.12.1 --no-compressed-pointers  # no_cptr 变体
+#   bash build-dartvm.sh --dart-version 3.12.1
 #
 # Usage (shared libs build — once):
 #   bash build-dartvm.sh --build-shared-libs-only
@@ -38,15 +36,13 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_ROOT=""
 JOBS=$(nproc 2>/dev/null || echo 4)
 BLUTTER_REPO="https://github.com/worawit/blutter.git"
-# blutter 固定 commit（main HEAD）
-# 已适配 3.13 的 Stub 枚举重构（VM_STUB_CODE_LIST 拆分）；
-# 3.13 的 AOT_Closure_* offset 布局变化上游尚未适配，3.13 暂无法构建。
-BLUTTER_COMMIT="4a60ac648bf448c5a7596437243bcd0b9376fdf0"
+# 固定 blutter commit：528acbe 为 Debug Repro 宿主实测可正常分析 Dart 3.12.1 的版本
+# （详见 dev-progress 引擎根因排查）。不随上游漂移，保证引擎与宿主行为一致。
+# 该 commit 无需任何 fler-dart 补丁（Step 1b / patch-elfhelper 已移除）。
+BLUTTER_COMMIT="528acbe83ba35a3a53fb97b231cb5f968c7068d1"
 # 默认静态 capstone：dartvm.so 自带 Capstone，引擎包不再产 libcapstone.so
 # （capstone 已静态进 fler APK）。--dynamic-capstone 可切回旧动态模式。
 USE_SHARED_CAPSTONE="OFF"
-# compressed-pointers 变体：默认 compressed；--no-compressed-pointers → no_cptr
-COMPRESSED_PTRS="ON"
 BUILD_SHARED_LIBS_ONLY="0"
 PREBUILT_SHARED_LIBS_DIR=""
 
@@ -61,7 +57,6 @@ while [[ $# -gt 0 ]]; do
         --dynamic-capstone) USE_SHARED_CAPSTONE="ON"; shift ;;
         --build-shared-libs-only) BUILD_SHARED_LIBS_ONLY="1"; shift ;;
         --prebuilt-shared-libs-dir) PREBUILT_SHARED_LIBS_DIR="$2"; shift 2 ;;
-        --no-compressed-pointers) COMPRESSED_PTRS="OFF"; shift ;;
         *) echo "ERROR: Unknown $1"; exit 1 ;;
     esac
 done
@@ -89,23 +84,9 @@ fi
 
 BLUTTER_DIR="$BUILD_ROOT/blutter"
 CAPSTONE_BUILD_DIR="$BUILD_ROOT/capstone_build"
+DARTVM_SO_BUILD_DIR="$BUILD_ROOT/dartvm_so_build"
 SQLITE_DIR="$BUILD_ROOT/sqlite"
 ARCH_TAG="android_arm64"
-
-# Dart 2.x 无压缩指针概念：compressed-pointers 是 Dart 3.x 才引入的 ABI 特性。
-# 对 2.x 版本强制 no_cptr（非压缩指针），避免构建出带 compressed 标志的错误变体。
-if [[ "$DART_VERSION" == 2.* ]]; then
-    COMPRESSED_PTRS="OFF"
-    echo "  Dart 2.x detected: forcing --no-compressed-pointers"
-fi
-
-# no_cptr 变体后缀：compressed 变体无后缀，no-compressed-pointers 变体加 _no_cptr
-if [ "$COMPRESSED_PTRS" = "OFF" ]; then
-    LIB_SUFFIX="_no_cptr"
-else
-    LIB_SUFFIX=""
-fi
-DARTVM_SO_BUILD_DIR="$BUILD_ROOT/dartvm_so_build${LIB_SUFFIX}"
 
 # Shared libs output (built once, reused)
 SHARED_LIBS_OUT="$OUTPUT_DIR/shared_libs"
@@ -305,7 +286,7 @@ echo "Blutter: $BLUTTER_DIR @ $(git -C "$BLUTTER_DIR" rev-parse HEAD)"
 # Step 1b / 1b-elf：已移除
 # - Step 1b（closure.entry_point → func.entry_point）曾为编译兼容，但 DART_PRECOMPILED_RUNTIME
 #   补齐后 Closure::entry_point() 在所有矩阵版本均存在，无需补丁。
-# - patch-elfhelper：4a60ac6 的 ElfHelper 无需此补丁。
+# - patch-elfhelper：528acbe 的 ElfHelper 宿主验证可正常分析，非必需。
 # ═══════════════════════════════════════════════
 
 # ═══════════════════════════════════════════════
@@ -416,18 +397,6 @@ new = ("    # fler-dart NDK injected\n"
 
 assert old in c, "Pattern not found in dartvm_fetch_build.py"
 c = c.replace(old, new)
-
-# 2. lib_name 加 compressed 后缀（no_cptr 变体用独立 .a 目录，避免与 compressed 互相覆盖）
-c = c.replace(
-    "        self.lib_name = f'dartvm{version}_{os_name}_{arch}'",
-    "        _suffix = '' if self.has_compressed_ptrs else '_no_cptr'\n        self.lib_name = f'dartvm{version}_{os_name}_{arch}{_suffix}'"
-)
-# 3. __main__ 从环境变量 DART_NO_COMPRESSED_PTRS 读 compressed 配置
-c = c.replace(
-    "    info = DartLibInfo(ver, os_name, arch, snapshot_hash=snapshot_hash)",
-    "    _has_cptr = None\n    if os.environ.get('DART_NO_COMPRESSED_PTRS') == '1':\n        _has_cptr = False\n    info = DartLibInfo(ver, os_name, arch, has_compressed_ptrs=_has_cptr, snapshot_hash=snapshot_hash)"
-)
-
 print("  dartvm_fetch_build.py: patched OK")
 with open(fetch_file, 'w') as f:
     f.write(c)
@@ -473,224 +442,6 @@ PYEOF
 cp "$REPO_DIR/dartvm/src/atomic_ref_compat.h" "$BLUTTER_DIR/" 2>/dev/null || true
 
 # ═══════════════════════════════════════════════
-# Step 1f: Patch Disassembler_arm64.h (CSREG_DART_HEAP no_cptr 占位)
-# blutter 的 CodeAnalyzer_arm64.cpp 无条件引用 CSREG_DART_HEAP（解压指针寄存器），
-# 但该常量仅在 DART_COMPRESSED_POINTERS 下定义；no_cptr 变体编译会报 undeclared。
-# 给 no_cptr 加占位定义（解压指针指令序列仅在 compressed 模式生成，占位值不会触发）。
-# ═══════════════════════════════════════════════
-echo ""
-echo "─── [1f] Patching Disassembler_arm64.h (CSREG_DART_HEAP no_cptr fallback) ───"
-
-BLUTTER_DISASM_H="$BLUTTER_DIR/blutter/src/Disassembler_arm64.h"
-if ! grep -q "fler-dart no_cptr" "$BLUTTER_DISASM_H" 2>/dev/null; then
-    python3 - "$BLUTTER_DISASM_H" << 'PYEOF'
-import sys
-path = sys.argv[1]
-s = open(path, encoding='utf-8').read()
-old = "#if defined(DART_COMPRESSED_POINTERS)\nconstexpr arm64_reg CSREG_DART_HEAP = ToCapstoneReg(dart::HEAP_BITS);\n#endif"
-new = ("#if defined(DART_COMPRESSED_POINTERS)\n"
-       "constexpr arm64_reg CSREG_DART_HEAP = ToCapstoneReg(dart::HEAP_BITS);\n"
-       "#else\n"
-       "// fler-dart no_cptr: 占位定义（解压指针路径仅在 compressed 模式触发）\n"
-       "constexpr arm64_reg CSREG_DART_HEAP = ToCapstoneReg(dart::TMP);\n"
-       "#endif")
-if old not in s:
-    print("  WARN: Disassembler_arm64.h CSREG_DART_HEAP 块未找到，跳过 patch")
-else:
-    s = s.replace(old, new, 1)
-    open(path, 'w', encoding='utf-8').write(s)
-    print("  Disassembler_arm64.h: no_cptr 占位已加")
-PYEOF
-else
-    echo "  Disassembler_arm64.h: fler-dart no_cptr 标记已存在，跳过"
-fi
-
-# ═══════════════════════════════════════════════
-# Step 1g: Patch CodeAnalyzer.cpp (per-function try/catch)
-# FunctionAnalyzer 遇到无法解析的指令序列会抛 InsnException（非 std::exception），
-# 未捕获会导致 std::terminate 整机崩溃。这里把「反汇编 + IL 分析」包进 try/catch，
-# 让单个函数解析失败时仅跳过该函数，其余函数继续分析。
-# ═══════════════════════════════════════════════
-echo ""
-echo "─── [1g] Patching CodeAnalyzer.cpp (per-function try/catch) ───"
-BLUTTER_CODEANALYZER_CPP="$BLUTTER_DIR/blutter/src/CodeAnalyzer.cpp"
-if ! grep -q "fler-dart per-fn-guard" "$BLUTTER_CODEANALYZER_CPP" 2>/dev/null; then
-    python3 - "$BLUTTER_CODEANALYZER_CPP" << 'PYEOF'
-import sys
-path = sys.argv[1]
-s = open(path, encoding='utf-8').read()
-
-if '#include <cstdio>' not in s and '#include <stdio.h>' not in s:
-    s = s.replace('#include "pch.h"', '#include "pch.h"\n#include <cstdio>', 1)
-
-# 优先按完整块匹配（反汇编 + IL 分析一起包 try）；若该提交结构有差异则回退到单行 asm2il。
-full_old = (
-    "\t\t\t\t// start from PayloadAddress or Address?\n"
-    "\t\t\t\t// the assemblies will be deleted after finish analysis because assembly with details consume too much memory\n"
-    "\t\t\t\tauto asm_insns = disasmer.Disasm((uint8_t*)dartFn->MemAddress(), dartFn->Size(), dartFn->Address());\n"
-    "\n"
-    "\t\t\t\tdartFn->SetAnalyzedData(std::make_unique<AnalyzedFnData>(app, *dartFn, convertAsm(asm_insns)));\n"
-    "\n"
-    "\t\t\t\tasm2il(dartFn, asm_insns);"
-)
-full_new = (
-    "\t\t\t\ttry {\n"
-    "\t\t\t\t\t// start from PayloadAddress or Address?\n"
-    "\t\t\t\t\t// the assemblies will be deleted after finish analysis because assembly with details consume too much memory\n"
-    "\t\t\t\t\tauto asm_insns = disasmer.Disasm((uint8_t*)dartFn->MemAddress(), dartFn->Size(), dartFn->Address());\n"
-    "\n"
-    "\t\t\t\t\tdartFn->SetAnalyzedData(std::make_unique<AnalyzedFnData>(app, *dartFn, convertAsm(asm_insns)));\n"
-    "\n"
-    "\t\t\t\t\tasm2il(dartFn, asm_insns);\n"
-    "\t\t\t\t} catch (const std::exception& e) {\n"
-    "\t\t\t\t\tfprintf(stderr, \"fler-dart: skip function (analysis error): %s\\n\", e.what());\n"
-    "\t\t\t\t} catch (...) {\n"
-    "\t\t\t\t\tfprintf(stderr, \"fler-dart: skip function (InsnException)\\n\");\n"
-    "\t\t\t\t} // fler-dart per-fn-guard"
-)
-
-single_old = "\t\t\t\tasm2il(dartFn, asm_insns);"
-single_new = (
-    "\t\t\t\ttry {\n"
-    "\t\t\t\t\tasm2il(dartFn, asm_insns);\n"
-    "\t\t\t\t} catch (const std::exception& e) {\n"
-    "\t\t\t\t\tfprintf(stderr, \"fler-dart: skip function (analysis error): %s\\n\", e.what());\n"
-    "\t\t\t\t} catch (...) {\n"
-    "\t\t\t\t\tfprintf(stderr, \"fler-dart: skip function (InsnException)\\n\");\n"
-    "\t\t\t\t} // fler-dart per-fn-guard"
-)
-
-if full_old in s:
-    s = s.replace(full_old, full_new, 1)
-    print("  CodeAnalyzer.cpp: per-function try/catch added (full block)")
-elif single_old in s:
-    s = s.replace(single_old, single_new, 1)
-    print("  CodeAnalyzer.cpp: per-function try/catch added (asm2il only)")
-else:
-    print("  WARN: CodeAnalyzer.cpp target not found, skip patch")
-
-open(path, 'w', encoding='utf-8').write(s)
-PYEOF
-else
-    echo "  CodeAnalyzer.cpp: fler-dart per-fn-guard 已存在，跳过"
-fi
-
-# ═══════════════════════════════════════════════
-# Step 1h: Patch DartLoader.cpp (VM 初始化幂等 + 复用)
-# Dart_SetVMFlags / Dart_Initialize 每个进程只能调用一次。终端 blutter 每个进程只分析一次，
-# 但 App 内会连续分析多个 APK，导致第二次分析抛 "Flags already set"。
-# 这里让 VM 初始化只做一次、Unload 时不再 Dart_Cleanup，同一进程内可反复分析。
-# ═══════════════════════════════════════════════
-echo ""
-echo "─── [1h] Patching DartLoader.cpp (VM init idempotent) ───"
-BLUTTER_DARTLOADER_CPP="$BLUTTER_DIR/blutter/src/DartLoader.cpp"
-if ! grep -q "fler-dart vm-reuse" "$BLUTTER_DARTLOADER_CPP" 2>/dev/null; then
-    python3 - "$BLUTTER_DARTLOADER_CPP" << 'PYEOF'
-import sys
-path = sys.argv[1]
-s = open(path, encoding='utf-8').read()
-
-# 1) Load 内 VM 初始化只做一次
-old_load = (
-    "Dart_Isolate DartLoader::Load(LibAppInfo& libInfo)\n"
-    "{\n"
-    "\tinit_vm_flags();\n"
-    "\n"
-    "\tinit_dart(libInfo.vm_snapshot_data, libInfo.vm_snapshot_instructions);\n"
-    "\n"
-    "\tauto isolate = load_isolate(libInfo.isolate_snapshot_data, libInfo.isolate_snapshot_instructions);\n"
-    "\n"
-    "\treturn isolate;\n"
-    "}"
-)
-new_load = (
-    "Dart_Isolate DartLoader::Load(LibAppInfo& libInfo)\n"
-    "{\n"
-    "\t// fler-dart vm-reuse: Dart_SetVMFlags / Dart_Initialize 仅首次调用\n"
-    "\tstatic bool vm_initialized = false;\n"
-    "\tif (!vm_initialized) {\n"
-    "\t\tinit_vm_flags();\n"
-    "\t\tinit_dart(libInfo.vm_snapshot_data, libInfo.vm_snapshot_instructions);\n"
-    "\t\tvm_initialized = true;\n"
-    "\t}\n"
-    "\n"
-    "\tauto isolate = load_isolate(libInfo.isolate_snapshot_data, libInfo.isolate_snapshot_instructions);\n"
-    "\n"
-    "\treturn isolate;\n"
-    "}"
-)
-
-# 2) Unload 不再清理 VM
-old_unload = (
-    "void DartLoader::Unload()\n"
-    "{\n"
-    "\tif (Dart_CurrentIsolate() != nullptr) {\n"
-    "\t\tDart_ShutdownIsolate();\n"
-    "\t}\n"
-    "\tignore_result(Dart_Cleanup());\n"
-    "}"
-)
-new_unload = (
-    "void DartLoader::Unload()\n"
-    "{\n"
-    "\tif (Dart_CurrentIsolate() != nullptr) {\n"
-    "\t\tDart_ShutdownIsolate();\n"
-    "\t}\n"
-    "\t// fler-dart vm-reuse: 不调用 Dart_Cleanup，保留 VM 供同进程内重复分析\n"
-    "}"
-)
-
-if old_load not in s:
-    print("  WARN: DartLoader::Load 目标块未找到，跳过 Load patch")
-else:
-    s = s.replace(old_load, new_load, 1)
-    print("  DartLoader::Load: VM 初始化幂等已加")
-
-if old_unload not in s:
-    print("  WARN: DartLoader::Unload 目标块未找到，跳过 Unload patch")
-else:
-    s = s.replace(old_unload, new_unload, 1)
-    print("  DartLoader::Unload: 保留 VM 已加")
-
-open(path, 'w', encoding='utf-8').write(s)
-PYEOF
-else
-    echo "  DartLoader.cpp: fler-dart vm-reuse 已存在，跳过"
-fi
-
-# ═══════════════════════════════════════════════
-# Step 1i: Patch CodeAnalyzer_arm64.cpp (FATAL → InsnException)
-# FunctionAnalyzer 里某些无法解析的指令序列用 FATAL()（Dart VM 宏，abort 整机崩溃）。
-# 改为抛 InsnException，让外层 per-function try/catch 跳过该函数，而不是 SIGABRT。
-# ═══════════════════════════════════════════════
-echo ""
-echo "─── [1i] Patching CodeAnalyzer_arm64.cpp (FATAL → InsnException) ───"
-BLUTTER_CODEANALYZER_ARM64="$BLUTTER_DIR/blutter/src/CodeAnalyzer_arm64.cpp"
-if ! grep -q "fler-dart fatal-guard" "$BLUTTER_CODEANALYZER_ARM64" 2>/dev/null; then
-    python3 - "$BLUTTER_CODEANALYZER_ARM64" << 'PYEOF'
-import sys
-path = sys.argv[1]
-s = open(path, encoding='utf-8').read()
-
-replacements = [
-    ('FATAL("add from NULL_REG");', 'throw InsnException("add from NULL_REG", insn);'),
-    ('FATAL("unexpected instruction");', 'throw InsnException("unexpected instruction", insn);'),
-    ('FATAL("static field without STR or LDR");', 'throw InsnException("static field without STR or LDR", insn); // fler-dart fatal-guard'),
-]
-count = 0
-for old, new in replacements:
-    if old in s:
-        s = s.replace(old, new, 1)
-        count += 1
-
-open(path, 'w', encoding='utf-8').write(s)
-print(f"  CodeAnalyzer_arm64.cpp: {count} FATAL -> InsnException")
-PYEOF
-else
-    echo "  CodeAnalyzer_arm64.cpp: fler-dart fatal-guard 已存在，跳过"
-fi
-
-# ═══════════════════════════════════════════════
 # Step 2: Run dartvm_fetch_build.py (with NDK env)
 # ═══════════════════════════════════════════════
 echo ""
@@ -706,7 +457,7 @@ export FLER_NDK="$NDK_PATH"
 
 # Determine snapshot hash from installed packages for cache key
 SNAPSHOT_HASH=""
-DARMVM_LIB_NAME="dartvm${DART_VERSION}_android_arm64${LIB_SUFFIX}"
+DARMVM_LIB_NAME="dartvm${DART_VERSION}_android_arm64"
 PACKAGES_DIR="$BLUTTER_DIR/packages"
 PACKAGES_LIB="$PACKAGES_DIR/lib/$DARMVM_LIB_NAME/lib$DARMVM_LIB_NAME.a"
 
@@ -739,9 +490,6 @@ if [ -f "$PACKAGES_LIB" ]; then
     rm -f "$PACKAGES_DIR/lib/$DARMVM_LIB_NAME"/*.a
 fi
 
-if [ "$COMPRESSED_PTRS" = "OFF" ]; then
-    export DART_NO_COMPRESSED_PTRS=1
-fi
 python3 dartvm_fetch_build.py "$DART_VERSION" android arm64
 
     DARTVM_LIB=$(find "$PACKAGES_DIR/lib" -name "*.a" 2>/dev/null | head -1 || true)
@@ -775,58 +523,78 @@ if command -v file > /dev/null; then
 fi
 
 # ═══════════════════════════════════════════════
-# Step 2b: 版本兼容宏（对齐 blutter.py find_compat_macro 官方逻辑，grep 检测头文件）
+# Step 1j: Patch Dart 3.x write-barrier false-positive guard
+# Dart 3.6+ may emit `tst x16, x28, lsr #32` in ordinary generated code.
+# Older Blutter versions classify this sequence as a write barrier and assert
+# `insn.ops(1).reg == CSREG_DART_HEAP`, repeatedly reporting the same address.
+# Convert only that assertion into InsnException so the per-function guard skips
+# the incompatible function and continues with the remaining functions.
+# ═══════════════════════════════════════════════
+echo ""
+echo "─── [1j] Patching write-barrier false-positive assertion ───"
+BLUTTER_SRC_DIR="$BLUTTER_DIR/blutter/src"
+python3 - "$BLUTTER_SRC_DIR" << 'PYEOF'
+import sys, os, re
+root = sys.argv[1]
+count = 0
+for name in ("CodeAnalyzer.cpp", "CodeAnalyzer_arm64.cpp"):
+    path = os.path.join(root, name)
+    if not os.path.isfile(path):
+        continue
+    lines = open(path, encoding="utf-8").read().splitlines(True)
+    out = []
+    changed = False
+    for line in lines:
+        if "CSREG_DART_HEAP" in line and re.search(r"\b(?:ASSERT|RELEASE_ASSERT|FATAL)\s*\(", line):
+            indent = line[:len(line)-len(line.lstrip())]
+            out.append(indent + 'throw InsnException("write barrier register mismatch", insn); // fler-dart wb-guard\n')
+            count += 1
+            changed = True
+        else:
+            out.append(line)
+    if changed:
+        open(path, "w", encoding="utf-8").writelines(out)
+print(f"  write-barrier assertion guards added: {count}")
+PYEOF
+
+# ═══════════════════════════════════════════════
+# Step 2b: Version-specific defines
 # ═══════════════════════════════════════════════
 VER_MAJOR=$(echo "$DART_VERSION" | cut -d. -f1)
+VER_MINOR=$(echo "$DART_VERSION" | cut -d. -f2)
 
 VERSION_DEFINES=""
-DART_VM_INC="$DARTVM_INCLUDE_DIR/vm"
-CLASS_ID_H="$DART_VM_INC/class_id.h"
-
-# 老 Map/Set 布局（class_id.h 含 V(LinkedHashMap)，2.18 及更早）
-if grep -q "V(LinkedHashMap)" "$CLASS_ID_H"; then
+# OLD_MAP_SET_NAME: Dart 2.x only (e.g. 2.18.6) use the pre-refactor Map/Set layout.
+# (Map/Set are not dart::VM classes; kMapCid/kSetCid absent from object.h).
+# All 3.x (including 3.2.3) already have proper Map/Set VM classes.
+if [ "$VER_MAJOR" -lt 3 ]; then
     VERSION_DEFINES="$VERSION_DEFINES -DOLD_MAP_SET_NAME=ON"
-    # 无 immutable Map/Set（2.14~2.17）
-    if ! grep -q "V(ImmutableLinkedHashMap)" "$CLASS_ID_H"; then
-        VERSION_DEFINES="$VERSION_DEFINES -DOLD_MAP_NO_IMMUTABLE=ON"
-    fi
 fi
-
-# 无 kLastInternalOnlyCid（2.14~2.17）
-if ! grep -q " kLastInternalOnlyCid " "$CLASS_ID_H"; then
-    VERSION_DEFINES="$VERSION_DEFINES -DNO_LAST_INTERNAL_ONLY_CID=ON"
-fi
-
-# 有 TypeRef（2.x~3.0，3.1 移除）
-if grep -q "V(TypeRef)" "$CLASS_ID_H"; then
+# HAS_TYPE_REF: the SDK still ships dart::TypeRef (removed later when
+# TypeParameter.bound was replaced by TypeParameter.owner). All 2.x have it.
+if [ "$VER_MAJOR" -lt 3 ]; then
     VERSION_DEFINES="$VERSION_DEFINES -DHAS_TYPE_REF=ON"
 fi
-
-# 有 RecordType（3.x）
-if [ "$VER_MAJOR" -ge 3 ] && grep -q "V(RecordType)" "$CLASS_ID_H"; then
-    VERSION_DEFINES="$VERSION_DEFINES -DHAS_RECORD_TYPE=ON"
-fi
-
-# 有 SharedClassTable（2.18 及更早，2.19 起并入 ClassTable）
-if grep -q "class SharedClassTable {" "$DART_VM_INC/class_table.h"; then
+# HAS_SHARED_CLASS_TABLE: use ig->shared_class_table() instead of ClassTable.
+# Dart 2.x exposes GetUnboxedFieldsMapAt() only on SharedClassTable (not on
+# ClassTable); 3.x has it on ClassTable so it keeps the default #else path.
+if [ "$VER_MAJOR" -lt 3 ]; then
     VERSION_DEFINES="$VERSION_DEFINES -DHAS_SHARED_CLASS_TABLE=ON"
 fi
-
-# 无 InitLateStaticField stub（2.14~2.15）
-if ! grep -q "V(InitLateStaticField)" "$DART_VM_INC/stub_code_list.h"; then
-    VERSION_DEFINES="$VERSION_DEFINES -DNO_INIT_LATE_STATIC_FIELD=ON"
+if [ "$VER_MAJOR" -ge 3 ]; then
+    VERSION_DEFINES="$VERSION_DEFINES -DHAS_RECORD_TYPE=ON"
 fi
-
-# 无 method extractor code（3.4 起）
-if ! grep -q "build_generic_method_extractor_code)" "$DART_VM_INC/object_store.h"; then
+if [ "$VER_MAJOR" -ge 3 ] && [ "$VER_MINOR" -ge 6 ]; then
+    VERSION_DEFINES="$VERSION_DEFINES -DUNIFORM_INTEGER_ACCESS=ON"
     VERSION_DEFINES="$VERSION_DEFINES -DNO_METHOD_EXTRACTOR_STUB=ON"
 fi
-
-# 无 AsTruncatedInt64Value（3.6 起整数访问统一为 Value()）
-if ! grep -q "AsTruncatedInt64Value()" "$DART_VM_INC/object.h"; then
-    VERSION_DEFINES="$VERSION_DEFINES -DUNIFORM_INTEGER_ACCESS=ON"
+# NO_INIT_LATE_STATIC_FIELD: only for SDKs WITHOUT a separate
+# InitLateStaticFieldStub enumerator (pch.h maps it onto InitStaticFieldStub).
+# 2.16+ and all 3.x DO have the split, so this must NOT be set for them
+# (defining it for 2.18.6 causes a StubKind enumerator redefinition).
+if [ "$VER_MAJOR" -eq 2 ] && [ "$VER_MINOR" -lt 16 ]; then
+    VERSION_DEFINES="$VERSION_DEFINES -DNO_INIT_LATE_STATIC_FIELD=ON"
 fi
-
 echo "Version defines: $VERSION_DEFINES"
 
 # ═══════════════════════════════════════════════
@@ -980,14 +748,13 @@ cmake -G Ninja \
     -DUSE_SHARED_CAPSTONE="$USE_SHARED_CAPSTONE" \
     -DSQLITE_DIR="$SQLITE_DIR" \
     -DICU_DIR="$ICU_DIR" \
-    -DNO_COMPRESSED_POINTERS="$([ "$COMPRESSED_PTRS" = "OFF" ] && echo ON || echo OFF)" \
     $VERSION_DEFINES \
     "$REPO_DIR/dartvm"
 
 cmake --build . -j "$JOBS"
 
 # ─── Output ───
-OUTPUT_FILE="$OUTPUT_DIR/dartvm_${DART_VERSION}_${ARCH_TAG}${LIB_SUFFIX}.so"
+OUTPUT_FILE="$OUTPUT_DIR/dartvm_${DART_VERSION}_${ARCH_TAG}.so"
 mkdir -p "$OUTPUT_DIR"
 cp "$DARTVM_SO_BUILD_DIR/libdartvm.so" "$OUTPUT_FILE"
 
