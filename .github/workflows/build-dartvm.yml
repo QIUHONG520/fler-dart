@@ -228,24 +228,22 @@ jobs:
           mkdir -p output
           BUILDROOT="/tmp/fler-dart-cache/dartvm_${{ matrix.dart-version }}"
           VER="${{ matrix.dart-version }}"
-          # Dart 2.x 无 compressed-pointers：跳过 compressed 变体，只构建 no_cptr，省一半构建时间
+          # Dart 2.x 没有 compressed-pointers：只构建 no_cptr 变体。
+          # 3.x 构建 compressed + no_cptr 两个变体。
           if [[ "$VER" != 2.* ]]; then
-            # compressed-pointers 变体
-            bash fler-dart/scripts/build-dartvm.sh \
+            bash scripts/build-dartvm.sh \
               --dart-version "$VER" \
-              --ndk-path $ANDROID_NDK_HOME \
+              --ndk-path "$ANDROID_NDK_HOME" \
               --output-dir "$(pwd)/output" \
               --build-root "$BUILDROOT" \
               --prebuilt-shared-libs-dir "$(pwd)/output/shared_libs"
           fi
-          # no-compressed-pointers 变体（_no_cptr 后缀，共用 BUILDROOT 复用 blutter/Dart SDK）
-          bash fler-dart/scripts/build-dartvm.sh \
+          FLER_NO_COMPRESSED_POINTERS=1 bash scripts/build-dartvm.sh \
             --dart-version "$VER" \
-            --ndk-path $ANDROID_NDK_HOME \
+            --ndk-path "$ANDROID_NDK_HOME" \
             --output-dir "$(pwd)/output" \
             --build-root "$BUILDROOT" \
-            --prebuilt-shared-libs-dir "$(pwd)/output/shared_libs" \
-            --no-compressed-pointers
+            --prebuilt-shared-libs-dir "$(pwd)/output/shared_libs"
 
       - name: Verify output
         run: |
