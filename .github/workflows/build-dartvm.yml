@@ -220,9 +220,6 @@ jobs:
           restore-keys: |
             dartvm-${{ matrix.dart-version }}-${{ env.NDK_VERSION }}-v14
 
-      - name: Patch blutter_entry.cpp (TMPDIR support)
-        run: bash fler-dart/scripts/patch-tmpdir.sh
-
       - name: Build dartvm.so (compressed + no_cptr)
         run: |
           mkdir -p output
