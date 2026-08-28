@@ -596,43 +596,60 @@ else
 fi
 
 # ═══════════════════════════════════════════════
-# Step 2b: Version-specific defines
+# Step 2b: 版本兼容宏（对齐 blutter.py find_compat_macro 官方逻辑，grep 检测头文件）
 # ═══════════════════════════════════════════════
 VER_MAJOR=$(echo "$DART_VERSION" | cut -d. -f1)
-VER_MINOR=$(echo "$DART_VERSION" | cut -d. -f2)
 
 VERSION_DEFINES=""
-# OLD_MAP_SET_NAME: Dart 2.x only (e.g. 2.18.6) use the pre-refactor Map/Set layout.
-# (Map/Set are not dart::VM classes; kMapCid/kSetCid absent from object.h).
-# All 3.x (including 3.2.3) already have proper Map/Set VM classes.
-if [ "$VER_MAJOR" -lt 3 ]; then
+DART_VM_INC="$DARTVM_INCLUDE_DIR/vm"
+CLASS_ID_H="$DART_VM_INC/class_id.h"
+
+# 老 Map/Set 布局（class_id.h 含 V(LinkedHashMap)，2.18 及更早）
+if grep -q "V(LinkedHashMap)" "$CLASS_ID_H"; then
     VERSION_DEFINES="$VERSION_DEFINES -DOLD_MAP_SET_NAME=ON"
+    # 无 immutable Map/Set（2.14~2.17）：blutter pch.h 编译需要此宏，否则报
+    # "unknown type name 'ImmutableLinkedHashMap'" / use of undeclared
+    # identifier 'kImmutableLinkedHashMapCid'（参见 2.14.4 构建失败）。
+    if ! grep -q "V(ImmutableLinkedHashMap)" "$CLASS_ID_H"; then
+        VERSION_DEFINES="$VERSION_DEFINES -DOLD_MAP_NO_IMMUTABLE=ON"
+    fi
 fi
-# HAS_TYPE_REF: the SDK still ships dart::TypeRef (removed later when
-# TypeParameter.bound was replaced by TypeParameter.owner). All 2.x have it.
-if [ "$VER_MAJOR" -lt 3 ]; then
+
+# 无 kLastInternalOnlyCid（2.14~2.17）
+if ! grep -q " kLastInternalOnlyCid " "$CLASS_ID_H"; then
+    VERSION_DEFINES="$VERSION_DEFINES -DNO_LAST_INTERNAL_ONLY_CID=ON"
+fi
+
+# 有 TypeRef（2.x~3.0，3.1 移除）
+if grep -q "V(TypeRef)" "$CLASS_ID_H"; then
     VERSION_DEFINES="$VERSION_DEFINES -DHAS_TYPE_REF=ON"
 fi
-# HAS_SHARED_CLASS_TABLE: use ig->shared_class_table() instead of ClassTable.
-# Dart 2.x exposes GetUnboxedFieldsMapAt() only on SharedClassTable (not on
-# ClassTable); 3.x has it on ClassTable so it keeps the default #else path.
-if [ "$VER_MAJOR" -lt 3 ]; then
-    VERSION_DEFINES="$VERSION_DEFINES -DHAS_SHARED_CLASS_TABLE=ON"
-fi
-if [ "$VER_MAJOR" -ge 3 ]; then
+
+# 有 RecordType（3.x）
+if [ "$VER_MAJOR" -ge 3 ] && grep -q "V(RecordType)" "$CLASS_ID_H"; then
     VERSION_DEFINES="$VERSION_DEFINES -DHAS_RECORD_TYPE=ON"
 fi
-if [ "$VER_MAJOR" -ge 3 ] && [ "$VER_MINOR" -ge 6 ]; then
-    VERSION_DEFINES="$VERSION_DEFINES -DUNIFORM_INTEGER_ACCESS=ON"
-    VERSION_DEFINES="$VERSION_DEFINES -DNO_METHOD_EXTRACTOR_STUB=ON"
+
+# 有 SharedClassTable（2.18 及更早，2.19 起并入 ClassTable）
+if grep -q "class SharedClassTable {" "$DART_VM_INC/class_table.h"; then
+    VERSION_DEFINES="$VERSION_DEFINES -DHAS_SHARED_CLASS_TABLE=ON"
 fi
-# NO_INIT_LATE_STATIC_FIELD: only for SDKs WITHOUT a separate
-# InitLateStaticFieldStub enumerator (pch.h maps it onto InitStaticFieldStub).
-# 2.16+ and all 3.x DO have the split, so this must NOT be set for them
-# (defining it for 2.18.6 causes a StubKind enumerator redefinition).
-if [ "$VER_MAJOR" -eq 2 ] && [ "$VER_MINOR" -lt 16 ]; then
+
+# 无 InitLateStaticField stub（2.14~2.15）
+if ! grep -q "V(InitLateStaticField)" "$DART_VM_INC/stub_code_list.h"; then
     VERSION_DEFINES="$VERSION_DEFINES -DNO_INIT_LATE_STATIC_FIELD=ON"
 fi
+
+# 无 method extractor code（3.4 起）
+if ! grep -q "build_generic_method_extractor_code)" "$DART_VM_INC/object_store.h"; then
+    VERSION_DEFINES="$VERSION_DEFINES -DNO_METHOD_EXTRACTOR_STUB=ON"
+fi
+
+# 无 AsTruncatedInt64Value（3.6 起整数访问统一为 Value()）
+if ! grep -q "AsTruncatedInt64Value()" "$DART_VM_INC/object.h"; then
+    VERSION_DEFINES="$VERSION_DEFINES -DUNIFORM_INTEGER_ACCESS=ON"
+fi
+
 echo "Version defines: $VERSION_DEFINES"
 
 # ═══════════════════════════════════════════════
