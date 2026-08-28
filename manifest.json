@@ -4,7 +4,7 @@
   "runtimeLibs": {
     "file": "fler-runtime-libs.7z",
     "url": "https://raw.githubusercontent.com/QIUHONG520/fler-dart/refs/heads/dist/dist/runtime/fler-runtime-libs.7z",
-    "sha256": "1d49b1e09ec55b99a022e1cbba316ba5f056cc26845cd4edf9786c8eab7c0f26",
+    "sha256": "78bdea2a234e01c4d90bf3b1fbc461efa9d71bb7c486cc848a3c39a04e632ca6",
     "sizeBytes": 345624
   },
   "engines": []
