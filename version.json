@@ -1,7 +1,7 @@
 {
   "version": "latest",
   "dartVersions": [],
-  "sizeBytes": 345624,
+  "sizeBytes": 345623,
   "releaseNotes": "v0.5.0：官方全版本（2.14~3.13）——自动拉取 dart-archive stable 列表，构建 2.14.0 至 3.13.1 共 105 个版本，后续新版本发布自动纳入，失败版本自动统计到 dist/failed-versions.txt 并在下次构建排除。",
   "downloadUrl": "https://raw.githubusercontent.com/QIUHONG520/fler-dart/refs/heads/main/manifest.json",
   "checksumUrl": "https://raw.githubusercontent.com/QIUHONG520/fler-dart/refs/heads/dist/dist/checksums.txt"
