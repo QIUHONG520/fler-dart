@@ -22,7 +22,6 @@
 #include <algorithm>
 #include <cinttypes>
 #include <filesystem>
-#include <unordered_map>
 
 #include <unistd.h>
 #include <sys/stat.h>
@@ -33,6 +32,8 @@
 #include "CodeAnalyzer.h"
 #include "DartThreadInfo.h"
 #include "FridaWriter.h"
+
+#include "dart_api.h"
 
 #include "sqlite3.h"
 
@@ -120,7 +121,7 @@ static void createTables() {
     );
     g_db.exec(
         "CREATE TABLE IF NOT EXISTS objs ("
-        "  obj_address INTEGER NOT NULL PRIMARY KEY,"
+        "  obj_address INTEGER PRIMARY KEY,"
         "  class_name TEXT,"
         "  field_hint TEXT"
         ")"
@@ -461,16 +462,17 @@ static void exportObjectPool(DartApp& app, DartDumper& dumper) {
 
         // 拆分 type / value（"Type: value" 形式）
         // desc 形如 "[pp+0x58] String: "内容"" / "[pp+0x40] List(5) [..]" / "[pp+0x10] Stub: X (0x..)"
-        // type 提取纯类型名（去掉 "[pp+0xNN] " 前缀），pp_offset 字段已单独记录偏移。
         std::string type, value;
         auto pos = desc.find(": ");
         if (pos != std::string::npos && pos > 0) {
-            std::string head = desc.substr(0, pos);  // "[pp+0x58] String"
-            if (!head.empty() && head.front() == '[') {
-                auto sp = head.find("] ");
-                if (sp != std::string::npos) head = head.substr(sp + 2);
+            type = desc.substr(0, pos);
+            // 0.5.1 schema: type stores only the semantic type. The PP offset
+            // is already available in pp_offset and must not be duplicated here.
+            if (type.rfind("[pp+", 0) == 0) {
+                const auto close = type.find(']');
+                if (close != std::string::npos) type = type.substr(close + 1);
+                while (!type.empty() && type.front() == ' ') type.erase(type.begin());
             }
-            type = head;
             value = desc.substr(pos + 2);
         } else {
             type = "";
@@ -518,31 +520,18 @@ static void exportObjectPool(DartApp& app, DartDumper& dumper) {
     fprintf(stderr, "fler-dart: exported %d pp entries, %d strings\n", pp, strings);
 }
 
-// 导出 string_refs（字符串→方法交叉引用）+ 回填 strings.ref_count。
-// 依赖 exportObjectPool 已填充 strings 表（pp_offset 唯一）。
-// 遍历每个方法的 AnalyzedData，收集 AsmText::PoolOffset 引用的对象池 offset；
-// 若该 offset 命中 strings 表（即引用的是字符串），建立 (string_id, method_address)
-// 关联（PRIMARY KEY 去重），最后把 ref_count 更新为引用该字符串的方法数。
+// 建立字符串到方法的交叉引用。AsmText::PoolOffset 是恢复后的真实 PP 槽偏移，
+// 与 strings.pp_offset 一一对应；用主键去重，避免同一方法重复引用造成计数膨胀。
 static void exportStringRefs(DartApp& app) {
-    // 1. 读 strings 表，构建 pp_offset -> string_id 映射
-    std::unordered_map<intptr_t, int64_t> strIdByOffset;
-    {
-        sqlite3_stmt* st = nullptr;
-        if (sqlite3_prepare_v2(g_db.db, "SELECT id, pp_offset FROM strings",
-                               -1, &st, nullptr) == SQLITE_OK) {
-            while (sqlite3_step(st) == SQLITE_ROW) {
-                strIdByOffset[(intptr_t)sqlite3_column_int64(st, 1)] =
-                    sqlite3_column_int64(st, 0);
-            }
-        }
-        sqlite3_finalize(st);
-    }
-    if (strIdByOffset.empty()) return;
+    sqlite3_stmt* insert = nullptr;
+    if (sqlite3_prepare_v2(g_db.db,
+        "INSERT OR IGNORE INTO string_refs (string_id, method_address) "
+        "SELECT id, ? FROM strings WHERE pp_offset = ?",
+        -1, &insert, nullptr) != SQLITE_OK) return;
 
-    // 2. 遍历方法，收集 PoolOffset 引用并写 string_refs
-    const auto& libs = app.fler_libs();
+    int refs = 0;
     g_db.exec("BEGIN TRANSACTION");
-    for (auto* lib : libs) {
+    for (auto* lib : app.fler_libs()) {
         if (!lib) continue;
         for (auto* cls : lib->classes) {
             if (!cls) continue;
@@ -550,46 +539,22 @@ static void exportStringRefs(DartApp& app) {
                 if (!fn) continue;
                 auto* data = fn->GetAnalyzedData();
                 if (!data) continue;
-                const auto& asmTexts = data->asmTexts.Data();
-                for (const auto& t : asmTexts) {
-                    if (t.dataType != AsmText::PoolOffset) continue;
-                    auto it = strIdByOffset.find((intptr_t)t.poolOffset);
-                    if (it == strIdByOffset.end()) continue;
-                    sqlite3_stmt* s = nullptr;
-                    if (sqlite3_prepare_v2(g_db.db,
-                        "INSERT OR IGNORE INTO string_refs (string_id, method_address) VALUES (?,?)",
-                        -1, &s, nullptr) == SQLITE_OK) {
-                        sqlite3_bind_int64(s, 1, it->second);
-                        sqlite3_bind_int64(s, 2, (int64_t)fn->Address());
-                        sqlite3_step(s);
-                    }
-                    sqlite3_finalize(s);
+                for (const auto& text : data->asmTexts.Data()) {
+                    if (text.dataType != AsmText::PoolOffset) continue;
+                    sqlite3_reset(insert);
+                    sqlite3_clear_bindings(insert);
+                    sqlite3_bind_int64(insert, 1, (int64_t)fn->Address());
+                    sqlite3_bind_int64(insert, 2, (int64_t)text.poolOffset);
+                    if (sqlite3_step(insert) == SQLITE_DONE && sqlite3_changes(g_db.db) > 0) refs++;
                 }
             }
         }
     }
+    sqlite3_finalize(insert);
+    g_db.exec("UPDATE strings SET ref_count = "
+              "(SELECT COUNT(*) FROM string_refs r WHERE r.string_id = strings.id)");
     g_db.exec("COMMIT");
-
-    // 3. 回填 ref_count = 引用该字符串的（去重）方法数
-    g_db.exec(
-        "UPDATE strings SET ref_count = ("
-        "  SELECT COUNT(*) FROM string_refs WHERE string_refs.string_id = strings.id"
-        ")"
-    );
-
-    // 统计实际关联数
-    int totalRefs = 0;
-    {
-        sqlite3_stmt* st = nullptr;
-        if (sqlite3_prepare_v2(g_db.db, "SELECT COUNT(*) FROM string_refs",
-                               -1, &st, nullptr) == SQLITE_OK) {
-            if (sqlite3_step(st) == SQLITE_ROW)
-                totalRefs = (int)sqlite3_column_int64(st, 0);
-        }
-        sqlite3_finalize(st);
-    }
-    fprintf(stderr, "fler-dart: exported %d string refs (distinct), ref_count updated\n",
-            totalRefs);
+    fprintf(stderr, "fler-dart: exported %d string refs\n", refs);
 }
 
 // 导出 objs 轻量索引 + enum_map（对象堆 dump 的摘要）
@@ -687,27 +652,19 @@ static void exportProducts(DartApp& app, DartDumper& dumper, const std::string& 
 
 // ─── Temp dir helpers ──────────────────────────
 static bool createTempDir(char* buf, size_t sz) {
-    // Priority: TMPDIR > TEMP > TMP > /data/local/tmp > /tmp
-    // Android app has no write permission for /data/local/tmp and /tmp.
-    // App should setenv("TMPDIR", app_cache_dir) before calling blutter_analyze.
-    const char* env_dirs[] = {
-        getenv("TMPDIR"),
-        getenv("TEMP"),
-        getenv("TMP"),
-    };
-    for (const char* d : env_dirs) {
-        if (d == nullptr || d[0] == '\0') continue;
-        size_t need = strlen(d) + 1 + 12 + 1;  // dir + "/" + "fler_XXXXXX" + "\0"
-        if (need > sz) continue;
-        snprintf(buf, sz, "%s/fler_XXXXXX", d);
-        if (mkdtemp(buf) != nullptr) return true;
+    // 优先用 TMPDIR（bridge 会 chdir + setenv 到 App 可写目录，避免 /data/local/tmp 不可写）
+    const char* tmp = getenv("TMPDIR");
+    if (tmp && tmp[0]) {
+        std::string tmpl = std::string(tmp) + "/fler_XXXXXX";
+        if (sz >= tmpl.size() + 1) {
+            strncpy(buf, tmpl.c_str(), sz);
+            if (mkdtemp(buf) != nullptr) return true;
+        }
     }
-    // fallback 1: /data/local/tmp (root device or classic Android)
     const char* tmpl = "/data/local/tmp/fler_XXXXXX";
     if (sz < strlen(tmpl) + 1) return false;
     strncpy(buf, tmpl, sz);
     if (mkdtemp(buf) == nullptr) {
-        // fallback 2: /tmp
         const char* alt = "/tmp/fler_XXXXXX";
         strncpy(buf, alt, sz);
         if (mkdtemp(buf) == nullptr) return false;
@@ -734,9 +691,29 @@ static void removeDir(const char* path) {
 // out_dir: path for dumped products (pp.txt/objs.txt/asm/ida_script/blutter_frida.js)
 // Returns 0 on success
 
+// fler-dart vm-reuse: the Dart VM is kept alive across analyses in the same
+// process (Dart_Cleanup is not called). If a worker (IO) thread is reused for a
+// new analysis, the previous isolate may still be current on it, which makes
+// Dart_CreateIsolate fail with:
+//   "CreateIsolate expects there to be no current isolate".
+// Detach (and shut down) any leftover isolate before starting the next analysis
+// so the thread is left in a clean state. App-side analysis is serialized onto a
+// single dedicated thread (AnalysisSerialExecutor) which also helps here.
+static void detachLeftoverIsolate() {
+    if (Dart_CurrentIsolate() != nullptr) {
+        // Dart_ExitIsolate clears the thread's current isolate; the subsequent
+        // Dart_ShutdownIsolate releases the isolate so repeated analyses do not
+        // leak isolates inside the (kept-alive) Dart VM.
+        Dart_ExitIsolate();
+        Dart_ShutdownIsolate();
+    }
+}
+
 extern "C" __attribute__((visibility("default")))
 int blutter_analyze(const char* so_path, const char* db_path, const char* out_dir) {
     fprintf(stderr, "fler-dart: analyze(so=%s, db=%s, out=%s)\n", so_path, db_path, out_dir);
+
+    detachLeftoverIsolate();
 
     char tmpdir[256] = {};
     if (!createTempDir(tmpdir, sizeof(tmpdir))) { fprintf(stderr, "fler-dart: temp dir failed\n"); return -1; }
@@ -745,15 +722,7 @@ int blutter_analyze(const char* so_path, const char* db_path, const char* out_di
         DartApp app{ so_path };
         app.EnterScope(); app.LoadInfo(); app.ExitScope();
 #ifndef NO_CODE_ANALYSIS
-        app.EnterScope();
-        try {
-            CodeAnalyzer ca{ app }; ca.AnalyzeAll();
-        } catch (...) {
-            // CodeAnalyzer 可能因某些代码模式抛 InsnException（非 std::exception），
-            // 捕获后继续导出 LoadInfo 已恢复的类/方法（部分结果），避免整机崩溃。
-            fprintf(stderr, "fler-dart: CodeAnalyzer failed (InsnException), continuing with partial results\n");
-        }
-        app.ExitScope();
+        app.EnterScope(); CodeAnalyzer ca{ app }; ca.AnalyzeAll(); app.ExitScope();
 #endif
         if (!g_db.open(db_path)) { removeDir(tmpdir); return -3; }
         createTables();
@@ -766,7 +735,6 @@ int blutter_analyze(const char* so_path, const char* db_path, const char* out_di
             exportAsmBlocks(app, dumper);
             // simpleForm=false：恢复标准描述格式 + 填充 knownObjectPtrs
             exportObjectPool(app, dumper);
-            // 字符串→方法交叉引用 + ref_count（依赖 strings 表已填充）
             exportStringRefs(app);
             // 落地全部标准产物
             std::string od = out_dir ? out_dir : "";
@@ -785,6 +753,10 @@ int blutter_analyze(const char* so_path, const char* db_path, const char* out_di
         fprintf(stderr, "fler-dart: analysis failed: uncaught exception (InsnException etc.)\n");
         removeDir(tmpdir); return -2;
     }
+
+    // Leave the worker thread with no current isolate so the next analysis on
+    // the same thread can create a fresh one (vm-reuse keeps the VM alive).
+    detachLeftoverIsolate();
 
     removeDir(tmpdir);
     fprintf(stderr, "fler-dart: done, db = %s\n", db_path);
