@@ -231,14 +231,14 @@ jobs:
           # Dart 2.x 没有 compressed-pointers：只构建 no_cptr 变体。
           # 3.x 构建 compressed + no_cptr 两个变体。
           if [[ "$VER" != 2.* ]]; then
-            bash scripts/build-dartvm.sh \
+            bash fler-dart/scripts/build-dartvm.sh \
               --dart-version "$VER" \
               --ndk-path "$ANDROID_NDK_HOME" \
               --output-dir "$(pwd)/output" \
               --build-root "$BUILDROOT" \
               --prebuilt-shared-libs-dir "$(pwd)/output/shared_libs"
           fi
-          FLER_NO_COMPRESSED_POINTERS=1 bash scripts/build-dartvm.sh \
+          FLER_NO_COMPRESSED_POINTERS=1 bash fler-dart/scripts/build-dartvm.sh \
             --dart-version "$VER" \
             --ndk-path "$ANDROID_NDK_HOME" \
             --output-dir "$(pwd)/output" \
