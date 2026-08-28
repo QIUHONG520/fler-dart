@@ -674,6 +674,7 @@ BLUTTER_CODEANALYZER_ARM64="$BLUTTER_DIR/blutter/src/CodeAnalyzer_arm64.cpp"
 if ! grep -q "fler-dart fatal-guard" "$BLUTTER_CODEANALYZER_ARM64" 2>/dev/null; then
     python3 - "$BLUTTER_CODEANALYZER_ARM64" << 'PYEOF'
 import sys
+import re
 path = sys.argv[1]
 s = open(path, encoding='utf-8').read()
 
@@ -687,6 +688,15 @@ for old, new in replacements:
     if old in s:
         s = s.replace(old, new, 1)
         count += 1
+
+# 通用兜底：把剩余所有 FATAL("msg"); 也转换为 throw InsnException("msg", insn);
+# 覆盖 Dart 3.6.0 等版本的高频错误点（line 524/555/431 等 15 处），避免逐个枚举遗漏。
+# CodeAnalyzer_arm64.cpp 的 FATAL 均在 FunctionAnalyzer 指令处理函数内（有 insn 变量），
+# 可安全转换。若未来某 FATAL 不在 insn 作用域，需回退为手动枚举。
+for msg in re.findall(r'FATAL\("([^"]*)"\);', s):
+    s = s.replace('FATAL("%s");' % msg,
+                  'throw InsnException("%s", insn); // fler-dart fatal-guard' % msg, 1)
+    count += 1
 
 open(path, 'w', encoding='utf-8').write(s)
 print(f"  CodeAnalyzer_arm64.cpp: {count} FATAL -> InsnException")
