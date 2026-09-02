@@ -813,6 +813,42 @@ OUTPUT_FILE="$OUTPUT_DIR/dartvm_${DART_VERSION}_${ARCH_TAG}.so"
 mkdir -p "$OUTPUT_DIR"
 cp "$DARTVM_SO_BUILD_DIR/libdartvm.so" "$OUTPUT_FILE"
 
+# ═══════════════════════════════════════════════
+# no_cptr 变体：--no-compressed-pointers（DART_COMPRESSED_POINTERS 不定义）。
+# 部分 libapp 以 --no-compressed-pointers 构建（快照配置里无 `compressed`），
+# 若用 compressed 变体引擎会报 "Snapshot not compatible ... compressed" 或读错
+# 对象布局导致段错误。故每个 Dart 版本同时产出两个变体 .so，与 CI 打包（7z 通配
+# dartvm_*.so，compressed + _no_cptr 共存）对应。
+# ═══════════════════════════════════════════════
+echo ""
+echo "─── [4b] Building dartvm.so (no_cptr variant) ───"
+NO_CPTR_BUILD_DIR="$BUILD_ROOT/dartvm_so_build_nocptr"
+mkdir -p "$NO_CPTR_BUILD_DIR"
+cd "$NO_CPTR_BUILD_DIR"
+cmake -G Ninja \
+    -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DANDROID_ABI=arm64-v8a \
+    -DANDROID_PLATFORM=android-31 \
+    -DANDROID_STL=c++_shared \
+    -DDART_VERSION="$DART_VERSION" \
+    -DBLUTTER_SRC_DIR="$BLUTTER_DIR/blutter/src" \
+    -DDARTVM_PACKAGES="$PACKAGES_DIR" \
+    -DDARTVM_LIB_NAME="$DARMVM_LIB_NAME" \
+    -DDARTVM_STATIC_LIB="$DARTVM_LIB" \
+    -DCAPSTONE_LIB="$CAPSTONE_LIB" \
+    -DCAPSTONE_INCLUDE_DIR="$CAPSTONE_INCLUDE_DIR" \
+    -DUSE_SHARED_CAPSTONE="$USE_SHARED_CAPSTONE" \
+    -DSQLITE_DIR="$SQLITE_DIR" \
+    -DICU_DIR="$ICU_DIR" \
+    -DNO_COMPRESSED_POINTERS=ON \
+    $VERSION_DEFINES \
+    "$REPO_DIR/dartvm"
+cmake --build . -j "$JOBS"
+NO_CPTR_OUTPUT="$OUTPUT_DIR/dartvm_${DART_VERSION}_${ARCH_TAG}_no_cptr.so"
+cp "$NO_CPTR_BUILD_DIR/libdartvm.so" "$NO_CPTR_OUTPUT"
+echo "  no_cptr variant: $NO_CPTR_OUTPUT"
+
 # Copy shared libs next to engine (runtime resolution via $ORIGIN)
 # 必要共享库（libc++_shared/ICU）在静态/动态模式下都随引擎包；
 # libcapstone.so 仅动态模式产出（静态模式 dartvm.so 已自带 Capstone）。
