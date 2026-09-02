@@ -152,6 +152,12 @@ target_compile_definitions(dartvm PRIVATE
 # build-dartvm.sh 传 -DNO_COMPRESSED_POINTERS=ON（--no-compressed-pointers）时不定义
 if(NOT NO_COMPRESSED_POINTERS)
     target_compile_definitions(dartvm PRIVATE DART_COMPRESSED_POINTERS)
+else()
+    # no_cptr 变体：Blutter 的 CodeAnalyzer_arm64.cpp 仅在 DART_COMPRESSED_POINTERS 下
+    # 定义 CSREG_DART_HEAP（压缩指针堆基址寄存器，= x28）。no_cptr 构建需显式补上该
+    # 别名，否则写屏障检测代码引用未定义标识符导致编译失败。no_cptr 下该模式不会命中，
+    # 定义其为 x28 是无害的。
+    target_compile_definitions(dartvm PRIVATE CSREG_DART_HEAP=ARM64_REG_X28)
 endif()
 
 # Version-specific defines
