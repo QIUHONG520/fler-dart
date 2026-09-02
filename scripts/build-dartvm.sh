@@ -39,7 +39,7 @@ BLUTTER_REPO="https://github.com/worawit/blutter.git"
 # 固定 blutter commit：528acbe 为 Debug Repro 宿主实测可正常分析 Dart 3.12.1 的版本
 # （详见 dev-progress 引擎根因排查）。不随上游漂移，保证引擎与宿主行为一致。
 # 该 commit 无需任何 fler-dart 补丁（Step 1b / patch-elfhelper 已移除）。
-BLUTTER_COMMIT="528acbe83ba35a3a53fb97b231cb5f968c7068d1"
+BLUTTER_COMMIT="401c7839823311311341bd8a3c24a5e49c6b8884"
 # 默认静态 capstone：dartvm.so 自带 Capstone，引擎包不再产 libcapstone.so
 # （capstone 已静态进 fler APK）。--dynamic-capstone 可切回旧动态模式。
 USE_SHARED_CAPSTONE="OFF"
