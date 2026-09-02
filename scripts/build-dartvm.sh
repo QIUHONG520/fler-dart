@@ -403,6 +403,35 @@ with open(fetch_file, 'w') as f:
 PYEOF
 fi
 
+# 1b. Patch dartvm_fetch_build.py: 支持 --no-compressed-pointers 构建 no_cptr VM。
+# 上游脚本 __main__ 不接收 has_compressed_ptrs（Android 恒 compressed），且 lib_name
+# 不含变体后缀。这里补：argv[4]=='--no-compressed-pointers' → has_compressed_ptrs=False，
+# 且 no_cptr 时 lib_name 追加 _nocptr，避免与 compressed 构建目录/产物冲突。
+if ! grep -q "fler-dart no_cptr" "$BLUTTER_FETCH" 2>/dev/null; then
+    echo "Patching dartvm_fetch_build.py (no_cptr support)..."
+    python3 - "$BLUTTER_FETCH" << 'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+
+old1 = "self.lib_name = f'dartvm{version}_{os_name}_{arch}'"
+new1 = "self.lib_name = f'dartvm{version}_{os_name}_{arch}' + ('' if self.has_compressed_ptrs else '_nocptr')  # fler-dart no_cptr"
+assert old1 in s, "lib_name pattern not found"
+s = s.replace(old1, new1)
+
+old2 = "    snapshot_hash = None if len(sys.argv) < 5 else sys.argv[4]\n    info = DartLibInfo(ver, os_name, arch, snapshot_hash=snapshot_hash)"
+new2 = ("    snapshot_hash = None if len(sys.argv) < 5 else sys.argv[4]\n"
+        "    # fler-dart no_cptr: argv[4]=='--no-compressed-pointers' builds non-compressed VM\n"
+        "    no_cptr = len(sys.argv) >= 5 and sys.argv[4] == '--no-compressed-pointers'\n"
+        "    info = DartLibInfo(ver, os_name, arch, has_compressed_ptrs=(not no_cptr), snapshot_hash=(None if no_cptr else snapshot_hash))")
+assert old2 in s, "__main__ pattern not found"
+s = s.replace(old2, new2)
+
+open(p, 'w', encoding='utf-8').write(s)
+print("  dartvm_fetch_build.py: no_cptr support added")
+PYEOF
+fi
+
 # 2. Patch CMake template (idempotent — always safe to re-apply)
 echo "Patching CMake template..."
 python3 - "$BLUTTER_TEMPLATE" "$BLUTTER_DIR" << 'PYEOF'
@@ -521,6 +550,25 @@ if command -v file > /dev/null; then
         exit 1
     fi
 fi
+
+# ─── no_cptr VM static lib（--no-compressed-pointers）───
+echo ""
+echo "─── [2b/5] Building Dart VM static lib (no_cptr variant) ───"
+DARMVM_LIB_NAME_NOCPTR="dartvm${DART_VERSION}_android_arm64_nocptr"
+DARTVM_LIB_NOCPTR="$PACKAGES_DIR/lib/$DARMVM_LIB_NAME_NOCPTR/lib$DARMVM_LIB_NAME_NOCPTR.a"
+DARTVM_INCLUDE_DIR_NOCPTR="$PACKAGES_DIR/include/$DARMVM_LIB_NAME_NOCPTR"
+if [ -f "$DARTVM_LIB_NOCPTR" ] && command -v file > /dev/null && file "$DARTVM_LIB_NOCPTR" | grep -qi "ARM\|aarch64"; then
+    echo "  cached no_cptr VM lib: $DARTVM_LIB_NOCPTR"
+else
+    echo "Running dartvm_fetch_build.py $DART_VERSION android arm64 --no-compressed-pointers..."
+    python3 dartvm_fetch_build.py "$DART_VERSION" android arm64 --no-compressed-pointers
+fi
+if [ ! -f "$DARTVM_LIB_NOCPTR" ]; then
+    echo "ERROR: no_cptr Dart VM static lib not found: $DARTVM_LIB_NOCPTR"
+    exit 1
+fi
+echo "no_cptr VM lib: $DARTVM_LIB_NOCPTR"
+echo "  size: $(ls -lh "$DARTVM_LIB_NOCPTR" | awk '{print $5}')"
 
 # ═══════════════════════════════════════════════
 # Step 1j: Patch Dart 3.x write-barrier false-positive guard
@@ -834,8 +882,8 @@ cmake -G Ninja \
     -DDART_VERSION="$DART_VERSION" \
     -DBLUTTER_SRC_DIR="$BLUTTER_DIR/blutter/src" \
     -DDARTVM_PACKAGES="$PACKAGES_DIR" \
-    -DDARTVM_LIB_NAME="$DARMVM_LIB_NAME" \
-    -DDARTVM_STATIC_LIB="$DARTVM_LIB" \
+    -DDARTVM_LIB_NAME="$DARMVM_LIB_NAME_NOCPTR" \
+    -DDARTVM_STATIC_LIB="$DARTVM_LIB_NOCPTR" \
     -DCAPSTONE_LIB="$CAPSTONE_LIB" \
     -DCAPSTONE_INCLUDE_DIR="$CAPSTONE_INCLUDE_DIR" \
     -DUSE_SHARED_CAPSTONE="$USE_SHARED_CAPSTONE" \
