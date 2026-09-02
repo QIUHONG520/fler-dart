@@ -4,8 +4,8 @@
   "runtimeLibs": {
     "file": "fler-runtime-libs.7z",
     "url": "https://raw.githubusercontent.com/QIUHONG520/fler-dart/refs/heads/dist/dist/runtime/fler-runtime-libs.7z",
-    "sha256": "df2e9574b5589e2e9c5e377ab5b129012c72bcf7b3c04e88a0093ed67b1830e2",
-    "sizeBytes": 345624
+    "sha256": "c8243fe57dcc6178466f2d19dc15eb8bd17c9b69a12efed13237dc93cb8ae707",
+    "sizeBytes": 345625
   },
-  "engines": []
+  "engines": [ { "dartVersion": "2.14.4", "file": "dartvm-2.14.4.7z", "url": "https://raw.githubusercontent.com/QIUHONG520/fler-dart/refs/heads/dist/dist/engines/dartvm-2.14.4.7z", "sha256": "c995704a5ed203c23de21fd909ae6614ebb53a518f6c698bad4010c82a8ad105", "sizeBytes": 2019770 }, { "dartVersion": "3.6.0", "file": "dartvm-3.6.0.7z", "url": "https://raw.githubusercontent.com/QIUHONG520/fler-dart/refs/heads/dist/dist/engines/dartvm-3.6.0.7z", "sha256": "554c2ff1eaf0fbdee394dc0a01355b7f116ba2df2be45f8e4842d3b6219587e7", "sizeBytes": 2095623 }]
 }
