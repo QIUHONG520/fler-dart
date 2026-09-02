@@ -42,7 +42,7 @@ BLUTTER_REPO="https://github.com/worawit/blutter.git"
 #   - app.GetFunction() 返回 DartFnBase*（仅用其 FullName()/ReturnType()）
 #   - cls->Functions() 仍返回 std::vector<DartFunction*>
 # 无需 Step 1b / patch-elfhelper（同 528acbe）。
-BLUTTER_COMMIT="401c7839823311311341bd8a3c24a5e49c6b8884"
+BLUTTER_COMMIT="4a60ac648bf448c5a7596437243bcd0b9376fdf0"
 # 默认静态 capstone：dartvm.so 自带 Capstone，引擎包不再产 libcapstone.so
 # （capstone 已静态进 fler APK）。--dynamic-capstone 可切回旧动态模式。
 USE_SHARED_CAPSTONE="OFF"
