@@ -36,7 +36,7 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_ROOT=""
 JOBS=$(nproc 2>/dev/null || echo 4)
 BLUTTER_REPO="https://github.com/worawit/blutter.git"
-# 固定 blutter commit：401c783（DartFnBase / DartStub / topClasses 重构版）。
+# 固定 blutter commit：4a60ac648bf448c5a7596437243bcd0b9376fdf0。
 # 该版本把 Function/Stub 统一到 DartFnBase 基类、库顶层函数/字段迁到 topClass("::")、
 # DartApp 增加 stubs/topClasses/GetStaticField 等；引擎 wrapper(blutter_entry.cpp) 已兼容：
 #   - app.GetFunction() 返回 DartFnBase*（仅用其 FullName()/ReturnType()）
@@ -461,8 +461,8 @@ c = c.replace(
 
 # 3. Exclude regexp/ dir (missing ICU headers on NDK; not needed for DART_PRECOMPILED_RUNTIME)
 c = c.replace(
-    "include(sourcelist.cmake)\\nadd_library",
-    "include(sourcelist.cmake)\\nif(ANDROID)\\n    list(FILTER SRCS EXCLUDE REGEX \\\"regexp\\\")\\nendif()\\nadd_library"
+    "include(sourcelist.cmake)\nadd_library",
+    "include(sourcelist.cmake)\nif(ANDROID)\n    list(FILTER SRCS EXCLUDE REGEX \"regexp\")\nendif()\nadd_library"
 )
 
 # 4. no_cptr 变体：.a 文件名由 LIBNAME 决定（非 DartLibInfo.lib_name）。当 COMPRESSED_PTRS=0
@@ -470,7 +470,7 @@ c = c.replace(
 #    避免与 compressed 的同名 .a 互相覆盖。头文件仍共用 include/${PROJECT_NAME}（相同）。
 c = c.replace(
     'set(LIBNAME "dartvm${DART_VERSION}_${TARGET_OS}_${TARGET_ARCH}")',
-    'set(LIBNAME "dartvm${DART_VERSION}_${TARGET_OS}_${TARGET_ARCH}")\\nif(DEFINED COMPRESSED_PTRS AND COMPRESSED_PTRS STREQUAL "0")\\n\\tset(LIBNAME "${LIBNAME}_nocptr")\\nendif()'
+    'set(LIBNAME "dartvm${DART_VERSION}_${TARGET_OS}_${TARGET_ARCH}")\nif(DEFINED COMPRESSED_PTRS AND COMPRESSED_PTRS STREQUAL "0")\n\tset(LIBNAME "${LIBNAME}_nocptr")\nendif()'
 )
 
 print("  CMake template: patched OK")
