@@ -21,6 +21,8 @@
 #include <sstream>
 #include <algorithm>
 #include <cinttypes>
+#include <csetjmp>
+#include <csignal>
 #include <filesystem>
 
 #include <unistd.h>
@@ -36,6 +38,21 @@
 #include "sqlite3.h"
 
 namespace fs = std::filesystem;
+
+// ─── CodeAnalyzer 崩溃隔离（SIGSEGV → 降级为只导出不反汇编）───
+// Blutter CodeAnalyzer 对某些 libapp.so 会读无效内存导致 SIGSEGV（健壮性缺陷）。
+// 该崩溃是进程级信号，C++ try-catch 捕获不到；这里用 sigsetjmp/siglongjmp 把
+// CodeAnalyzer 隔离在独立保护区：崩溃则跳过反汇编、继续导出对象池/类/方法，
+// 使「引擎崩溃」降级为「部分成功」而不是整个分析失败。
+namespace {
+static thread_local sigjmp_buf g_ca_jmp;
+static thread_local volatile sig_atomic_t g_ca_crash = 0;
+
+static void caCrashHandler(int sig, siginfo_t*, void*) {
+    g_ca_crash = sig;
+    siglongjmp(g_ca_jmp, 1);
+}
+} // namespace
 
 // ─── SQLite wrapper ─────────────────────────────
 struct Db {
@@ -720,7 +737,41 @@ int blutter_analyze(const char* so_path, const char* db_path, const char* out_di
         DartApp app{ so_path };
         app.EnterScope(); app.LoadInfo(); app.ExitScope();
 #ifndef NO_CODE_ANALYSIS
-        app.EnterScope(); CodeAnalyzer ca{ app }; ca.AnalyzeAll(); app.ExitScope();
+        {
+            // 隔离 CodeAnalyzer：崩溃则降级为只导出不反汇编（见 caCrashHandler）。
+            struct sigaction sa;
+            memset(&sa, 0, sizeof(sa));
+            sa.sa_sigaction = caCrashHandler;
+            sa.sa_flags = SA_SIGINFO;
+            sigemptyset(&sa.sa_mask);
+            struct sigaction old_segv, old_bus, old_fpe, old_abrt, old_ill;
+            sigaction(SIGSEGV, &sa, &old_segv);
+            sigaction(SIGBUS, &sa, &old_bus);
+            sigaction(SIGFPE, &sa, &old_fpe);
+            sigaction(SIGABRT, &sa, &old_abrt);
+            sigaction(SIGILL, &sa, &old_ill);
+
+            g_ca_crash = 0;
+            if (sigsetjmp(g_ca_jmp, 1) == 0) {
+                app.EnterScope();
+                CodeAnalyzer ca{ app };
+                ca.AnalyzeAll();
+                app.ExitScope();
+            } else {
+                // CodeAnalyzer 崩溃：恢复 scope（EnterScope 已执行），跳过反汇编，
+                // 后续导出会按 GetAnalyzedData()==null 自动退化为方法名占位。
+                app.ExitScope();
+                fprintf(stderr,
+                        "fler-dart: CodeAnalyzer crashed (signal %d), fallback to no-analysis export\n",
+                        (int)g_ca_crash);
+            }
+
+            sigaction(SIGSEGV, &old_segv, nullptr);
+            sigaction(SIGBUS, &old_bus, nullptr);
+            sigaction(SIGFPE, &old_fpe, nullptr);
+            sigaction(SIGABRT, &old_abrt, nullptr);
+            sigaction(SIGILL, &old_ill, nullptr);
+        }
 #endif
         if (!g_db.open(db_path)) { removeDir(tmpdir); return -3; }
         createTables();
