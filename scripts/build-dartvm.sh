@@ -660,6 +660,7 @@ fi
 # Step 2b: 版本兼容宏（对齐 blutter.py find_compat_macro 官方逻辑，grep 检测头文件）
 # ═══════════════════════════════════════════════
 VER_MAJOR=$(echo "$DART_VERSION" | cut -d. -f1)
+VER_MINOR=$(echo "$DART_VERSION" | cut -d. -f2)
 
 VERSION_DEFINES=""
 DART_VM_INC="$DARTVM_INCLUDE_DIR/vm"
@@ -709,6 +710,14 @@ fi
 # 无 AsTruncatedInt64Value（3.6 起整数访问统一为 Value()）
 if ! grep -q "AsTruncatedInt64Value()" "$DART_VM_INC/object.h"; then
     VERSION_DEFINES="$VERSION_DEFINES -DUNIFORM_INTEGER_ACCESS=ON"
+fi
+
+# Dart < 2.15 无压缩指针：blutter.py 对该版本强制 no-analysis（Blutter CodeAnalyzer
+# 不支持 no-compressed 指针的代码反汇编，强行跑会段错误）。fler-dart 引擎同样跳过
+# CodeAnalyzer，只做快照加载 + 对象池/类/方法导出（方法反汇编留空、asm_blocks 不产出）。
+# 见 blutter.py: `if int(vers[0]) == 2 and int(vers[1]) < 15: no_analysis = True`。
+if [ "$VER_MAJOR" -eq 2 ] && [ "$VER_MINOR" -lt 15 ]; then
+    VERSION_DEFINES="$VERSION_DEFINES -DNO_CODE_ANALYSIS=ON"
 fi
 
 echo "Version defines: $VERSION_DEFINES"
