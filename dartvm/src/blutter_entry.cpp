@@ -758,9 +758,11 @@ int blutter_analyze(const char* so_path, const char* db_path, const char* out_di
                 ca.AnalyzeAll();
                 app.ExitScope();
             } else {
-                // CodeAnalyzer 崩溃：恢复 scope（EnterScope 已执行），跳过反汇编，
-                // 后续导出会按 GetAnalyzedData()==null 自动退化为方法名占位。
-                app.ExitScope();
+                // CodeAnalyzer 崩溃：跳过反汇编。这里【不】调用 ExitScope——Dart_ExitScope
+                // 在 isolate 状态可能已损坏时也会崩溃，而崩溃隔离的 signal handler 尚未恢复，
+                // 二次崩溃会再次 siglongjmp（g_ca_jmp 已消费，行为未定义）导致降级失效、
+                // 最终仍以 -997 收场。EnterScope/ExitScope 均有 inScope 幂等标志，保持
+                // inScope=true 不会 double-enter，后续导出按 GetAnalyzedData()==null 自动退化。
                 fprintf(stderr,
                         "fler-dart: CodeAnalyzer crashed (signal %d), fallback to no-analysis export\n",
                         (int)g_ca_crash);
