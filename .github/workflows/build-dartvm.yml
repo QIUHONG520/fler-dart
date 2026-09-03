@@ -225,17 +225,13 @@ jobs:
           mkdir -p output
           BUILDROOT="/tmp/fler-dart-cache/dartvm_${{ matrix.dart-version }}"
           VER="${{ matrix.dart-version }}"
-          # Dart 2.x 没有 compressed-pointers：只构建 no_cptr 变体。
-          # 3.x 构建 compressed + no_cptr 两个变体。
-          if [[ "$VER" != 2.* ]]; then
-            bash fler-dart/scripts/build-dartvm.sh \
-              --dart-version "$VER" \
-              --ndk-path "$ANDROID_NDK_HOME" \
-              --output-dir "$(pwd)/output" \
-              --build-root "$BUILDROOT" \
-              --prebuilt-shared-libs-dir "$(pwd)/output/shared_libs"
-          fi
-          FLER_NO_COMPRESSED_POINTERS=1 bash fler-dart/scripts/build-dartvm.sh \
+          # build-dartvm.sh 单次运行即同时产出两个变体：
+          #   dartvm_<v>_android_arm64.so（compressed-pointers）
+          #   dartvm_<v>_android_arm64_no_cptr.so（--no-compressed-pointers）
+          # 注意：Dart 2.15+ 与 3.x 默认 compressed-pointers，但部分 libapp 用
+          # --no-compressed-pointers 构建（快照 feature 里无 compressed），故每个版本
+          # 都必须同时发布两变体，由 App 端按快照 feature flags 自动选择。
+          bash fler-dart/scripts/build-dartvm.sh \
             --dart-version "$VER" \
             --ndk-path "$ANDROID_NDK_HOME" \
             --output-dir "$(pwd)/output" \
