@@ -377,8 +377,10 @@ static void exportClassesAndMethods(DartApp& app, DartDumper& dumper) {
 
             // classes (id, name, super_cls, fields)
             {
-                // 生成字段描述："name@offset:type" 逗号分隔
+                // NO_CODE_ANALYSIS 是崩溃兜底路径：避免字段类型 ToString()/父类遍历等
+                // 深层对象访问，只导出稳定的结构标识。标准引擎保留完整字段信息。
                 std::string fields;
+#ifndef NO_CODE_ANALYSIS
                 for (auto* f : cls->Fields()) {
                     if (!f) continue;
                     if (!fields.empty()) fields += ", ";
@@ -388,6 +390,7 @@ static void exportClassesAndMethods(DartApp& app, DartDumper& dumper) {
                     if (f->Type()) typeName = f->Type()->ToString();
                     fields += f->Name() + "@" + offbuf + ":" + typeName;
                 }
+#endif
                 sqlite3_stmt* st = nullptr;
                 if (sqlite3_prepare_v2(g_db.db,
                     "INSERT OR IGNORE INTO classes (id, name, super_cls, fields) VALUES (?,?,?,?)",
@@ -395,7 +398,11 @@ static void exportClassesAndMethods(DartApp& app, DartDumper& dumper) {
                     sqlite3_bind_int64(st, 1, (int64_t)cls->Id());
                     sqlite3_bind_text(st, 2, cls->Name().c_str(), -1, SQLITE_TRANSIENT);
                     const std::string super =
+#ifndef NO_CODE_ANALYSIS
                         cls->Parent() ? cls->Parent()->Name() : std::string();
+#else
+                        std::string();
+#endif
                     sqlite3_bind_text(st, 3, super.c_str(), -1, SQLITE_TRANSIENT);
                     sqlite3_bind_text(st, 4, fields.c_str(), -1, SQLITE_TRANSIENT);
                     sqlite3_step(st);
@@ -407,7 +414,12 @@ static void exportClassesAndMethods(DartApp& app, DartDumper& dumper) {
             // methods (class_id, name, address, size, src_code)
             for (auto* fn : cls->Functions()) {
                 if (!fn) continue;
-                const std::string asmText = buildFunctionAsm(fn, app, dumper);
+                const std::string asmText =
+#ifndef NO_CODE_ANALYSIS
+                    buildFunctionAsm(fn, app, dumper);
+#else
+                    fn->Name();
+#endif
                 const std::string mname = buildFunctionName(fn, cls);
                 sqlite3_stmt* st = nullptr;
                 if (sqlite3_prepare_v2(g_db.db,
@@ -736,14 +748,22 @@ extern "C" __attribute__((visibility("default")))
 int blutter_analyze(const char* so_path, const char* db_path, const char* out_dir) {
     fprintf(stderr, "fler-dart: analyze(so=%s, db=%s, out=%s)\n", so_path, db_path, out_dir);
 
+    fprintf(stderr, "fler-dart: stage=detach-isolate\n");
+    fflush(stderr);
     detachLeftoverIsolate();
 
     char tmpdir[256] = {};
     if (!createTempDir(tmpdir, sizeof(tmpdir))) { fprintf(stderr, "fler-dart: temp dir failed\n"); return -1; }
 
     try {
+        fprintf(stderr, "fler-dart: stage=create-app\n");
+        fflush(stderr);
         DartApp app{ so_path };
+        fprintf(stderr, "fler-dart: stage=load-info\n");
+        fflush(stderr);
         app.EnterScope(); app.LoadInfo(); app.ExitScope();
+        fprintf(stderr, "fler-dart: stage=load-info-done\n");
+        fflush(stderr);
 #ifndef NO_CODE_ANALYSIS
         {
             // 隔离 CodeAnalyzer：崩溃则降级为只导出不反汇编（见 caCrashHandler）。
@@ -783,28 +803,49 @@ int blutter_analyze(const char* so_path, const char* db_path, const char* out_di
             sigaction(SIGILL, &old_ill, nullptr);
         }
 #endif
+        fprintf(stderr, "fler-dart: stage=open-database\n");
+        fflush(stderr);
         if (!g_db.open(db_path)) { removeDir(tmpdir); return -3; }
         createTables();
 
         app.EnterScope();
         {
             DartDumper dumper{ app };
+            // 核心表最先导出并独立 COMMIT。即使之后对象池、附加文件或析构崩溃，
+            // App 也能检测并保留 classes/methods，而不是误重试压缩指针对侧变体。
+            fprintf(stderr, "fler-dart: stage=export-classes-methods\n");
+            fflush(stderr);
             exportClassesAndMethods(app, dumper);
-            // 独立表：标准 DumpCode 格式完整反汇编存档（与 asm/*.dart 一致）
+            fprintf(stderr, "fler-dart: stage=export-classes-methods-done\n");
+            fflush(stderr);
+#ifndef NO_CODE_ANALYSIS
+            fprintf(stderr, "fler-dart: stage=export-asm\n");
+            fflush(stderr);
             exportAsmBlocks(app, dumper);
-            // simpleForm=false：恢复标准描述格式 + 填充 knownObjectPtrs
+#endif
+            fprintf(stderr, "fler-dart: stage=export-object-pool\n");
+            fflush(stderr);
             exportObjectPool(app, dumper);
+#ifndef NO_CODE_ANALYSIS
             exportStringRefs(app);
-            // 落地全部标准产物
+            // 标准引擎落地全部 Blutter 附加产物。安全引擎不生成 objs/IDA/Frida：
+            // 这些并非数据库浏览必需，并且是旧 Dart 快照后处理崩溃的高风险区。
             std::string od = out_dir ? out_dir : "";
             if (!od.empty()) {
+                fprintf(stderr, "fler-dart: stage=export-products\n");
+                fflush(stderr);
                 exportProducts(app, dumper, od);
                 exportObjsIndex(od + "/objs.txt");
             }
+#endif
+            fprintf(stderr, "fler-dart: stage=exports-done\n");
+            fflush(stderr);
         }
         app.ExitScope();
 
         g_db.close();
+        fprintf(stderr, "fler-dart: stage=database-closed\n");
+        fflush(stderr);
     } catch (std::exception& e) {
         fprintf(stderr, "fler-dart: analysis failed: %s\n", e.what());
         removeDir(tmpdir); return -2;
