@@ -919,6 +919,52 @@ NO_CPTR_OUTPUT="$OUTPUT_DIR/dartvm_${DART_VERSION}_${ARCH_TAG}_no_cptr.so"
 cp "$NO_CPTR_BUILD_DIR/libdartvm.so" "$NO_CPTR_OUTPUT"
 echo "  no_cptr variant: $NO_CPTR_OUTPUT"
 
+# ─── NO_CODE_ANALYSIS 兜底变体 ───
+# CodeAnalyzer 对少数 libapp.so 的异常指令会段错误。安全变体保留快照加载、
+# 对象池/类/方法导出，但在编译期完全移除反汇编代码，供 App 在标准引擎崩溃后
+# 自动切换。必须为 compressed 与 no_cptr 各编译一份，否则仍会触发快照配置不匹配。
+echo ""
+echo "─── [4c] Building NO_CODE_ANALYSIS fallback variants ───"
+SAFE_COMMON_ARGS=(
+    -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE"
+    -DCMAKE_BUILD_TYPE=Release
+    -DANDROID_ABI=arm64-v8a
+    -DANDROID_PLATFORM=android-31
+    -DANDROID_STL=c++_shared
+    -DDART_VERSION="$DART_VERSION"
+    -DBLUTTER_SRC_DIR="$BLUTTER_DIR/blutter/src"
+    -DDARTVM_PACKAGES="$PACKAGES_DIR"
+    -DCAPSTONE_LIB="$CAPSTONE_LIB"
+    -DCAPSTONE_INCLUDE_DIR="$CAPSTONE_INCLUDE_DIR"
+    -DUSE_SHARED_CAPSTONE="$USE_SHARED_CAPSTONE"
+    -DSQLITE_DIR="$SQLITE_DIR"
+    -DICU_DIR="$ICU_DIR"
+    -DNO_CODE_ANALYSIS=ON
+)
+SAFE_CPTR_BUILD_DIR="$BUILD_ROOT/dartvm_so_build_safe"
+mkdir -p "$SAFE_CPTR_BUILD_DIR"
+cd "$SAFE_CPTR_BUILD_DIR"
+cmake -G Ninja "${SAFE_COMMON_ARGS[@]}" $VERSION_DEFINES \
+    -DDARTVM_LIB_NAME="$DARMVM_LIB_NAME" \
+    -DDARTVM_STATIC_LIB="$DARTVM_LIB" \
+    "$REPO_DIR/dartvm"
+cmake --build . -j "$JOBS"
+SAFE_CPTR_OUTPUT="$OUTPUT_DIR/dartvm_${DART_VERSION}_${ARCH_TAG}_safe.so"
+cp "$SAFE_CPTR_BUILD_DIR/libdartvm.so" "$SAFE_CPTR_OUTPUT"
+
+SAFE_NOCPTR_BUILD_DIR="$BUILD_ROOT/dartvm_so_build_nocptr_safe"
+mkdir -p "$SAFE_NOCPTR_BUILD_DIR"
+cd "$SAFE_NOCPTR_BUILD_DIR"
+cmake -G Ninja "${SAFE_COMMON_ARGS[@]}" $VERSION_DEFINES \
+    -DDARTVM_LIB_NAME="$DARMVM_LIB_NAME_NOCPTR" \
+    -DDARTVM_STATIC_LIB="$DARTVM_LIB_NOCPTR" \
+    -DNO_COMPRESSED_POINTERS=ON \
+    "$REPO_DIR/dartvm"
+cmake --build . -j "$JOBS"
+SAFE_NOCPTR_OUTPUT="$OUTPUT_DIR/dartvm_${DART_VERSION}_${ARCH_TAG}_no_cptr_safe.so"
+cp "$SAFE_NOCPTR_BUILD_DIR/libdartvm.so" "$SAFE_NOCPTR_OUTPUT"
+echo "  safe variants: $SAFE_CPTR_OUTPUT, $SAFE_NOCPTR_OUTPUT"
+
 # Copy shared libs next to engine (runtime resolution via $ORIGIN)
 # 必要共享库（libc++_shared/ICU）在静态/动态模式下都随引擎包；
 # libcapstone.so 仅动态模式产出（静态模式 dartvm.so 已自带 Capstone）。
