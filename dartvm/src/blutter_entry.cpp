@@ -45,11 +45,19 @@ namespace fs = std::filesystem;
 // CodeAnalyzer 隔离在独立保护区：崩溃则跳过反汇编、继续导出对象池/类/方法，
 // 使「引擎崩溃」降级为「部分成功」而不是整个分析失败。
 namespace {
-static thread_local sigjmp_buf g_ca_jmp;
-static thread_local volatile sig_atomic_t g_ca_crash = 0;
+// 注意：不能用 thread_local！引擎 .so 是运行时 dlopen 的，其 TLS 走 general-dynamic
+// 模型，signal handler 里访问会触发 __tls_get_addr（非 async-signal-safe），导致
+// caCrashHandler 在崩溃现场再次卡死/崩溃，siglongjmp 无法执行。分析本身单线程
+// （blutter_analyze 在单一线程内跑，watchdog 仅 pthread_kill 不触碰这些变量），
+// 用普通 static 全局即可，signal handler 里直接绝对地址访问，安全。
+static sigjmp_buf g_ca_jmp;
+static volatile sig_atomic_t g_ca_crash = 0;
 
 static void caCrashHandler(int sig, siginfo_t*, void*) {
     g_ca_crash = sig;
+    // write(2) 为 async-signal-safe，用于确认 handler 被调用（fprintf 不安全）。
+    const char msg[] = "fler-dart: caCrashHandler called\n";
+    write(2, msg, sizeof(msg) - 1);
     siglongjmp(g_ca_jmp, 1);
 }
 } // namespace
