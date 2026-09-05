@@ -209,8 +209,9 @@ static void writeMethodAnalysis(DartApp& app) {
             sqlite3_bind_int64(update, 2, static_cast<sqlite3_int64>(address));
             sqlite3_step(update);
         }
+        sqlite3_finalize(update);
+        g_db.exec("UPDATE method_analysis SET status='FAILED' WHERE error IS NOT NULL AND error <> ''");
     }
-    sqlite3_finalize(update);
 }
 
 // Store factual coverage statistics instead of treating rc=0 as a complete
@@ -247,7 +248,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
         put(key, std::to_string(n));
     };
 
-    put("engine_abi", "fler-dart-v0.5.16");
+    put("engine_abi", "fler-dart-v0.5.17");
 #ifdef DART_VERSION
     put("dart_version", DART_VERSION);
 #else
@@ -276,7 +277,8 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
         return n;
     };
     put("empty_methods", std::to_string(statusCount("EMPTY")));
-    put("failed_methods", std::to_string(noCodeAnalysis ? 0 : statusCount("METADATA_ONLY")));
+    put("failed_methods", std::to_string(noCodeAnalysis ? 0 : statusCount("FAILED")));
+    put("metadata_only_methods", std::to_string(statusCount("METADATA_ONLY")));
     put("unknown_functions", std::to_string(statusCount("UNKNOWN")));
     sqlite3_stmt* errorStmt = nullptr;
     long long errorCount = 0;
