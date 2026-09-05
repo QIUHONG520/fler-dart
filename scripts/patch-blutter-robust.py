@@ -156,6 +156,71 @@ uint64_t target = (uint64_t)insn.ops(0).imm;""", """\t\t// cmp SP, TMP. If it is
 \t\t\tdstReg = A64::Register{ insn.ops(0).reg };""", 1)
     return s
 
+
+def arm64_analyzer_recovery(s):
+    # Do not abort an entire analysis for patterns that are valid but not
+    # recognized by the current Dart-version matcher.
+    s = s.replace('''\t\t\tINSN_ASSERT(insn.id() == ARM64_INS_B && insn.cc() == ARM64_CC_EQ);''', '''\t\t\tif (insn.id() != ARM64_INS_B || insn.cc() != ARM64_CC_EQ) return nullptr;''', 1)
+    s = s.replace('''\t\tif (insn.id() != ARM64_INS_STR && insn.id() != ARM64_INS_LDR) {
+\t\t\tFATAL(\"static field without STR or LDR\");
+\t\t}''', '''\t\tif (insn.id() != ARM64_INS_STR && insn.id() != ARM64_INS_LDR) {
+\t\t\treturn nullptr;
+\t\t}''', 1)
+    # Field-table metadata can be stale/misaligned in optimized snapshots. It
+    # is still a normal static-field load; preserve that IL instead of throwing.
+    needle='''\t\t\t\t\tINSN_ASSERT(dartField.Offset() == field_offset);'''
+    replacement='''\t\t\t\t\tif (dartField.Offset() != field_offset) {
+\t\t\t\t\t\tinsn.SetCurrent(loadStaicInstr_endIns);
+\t\t\t\t\t\treturn std::make_unique<LoadStaticFieldInstr>(insn.Wrap(marker.Take()), dstReg, field_offset);
+\t\t\t\t\t}'''
+    s=s.replace(needle,replacement,1)
+    # Same mismatch occurs in the late-initialization error path; reject the
+    # specialized pattern and let the generic parser continue.
+    s=s.replace('''\t\t\t\t\tINSN_ASSERT(dartField.Offset() == field_offset);''', '''\t\t\t\t\tif (dartField.Offset() != field_offset) return nullptr;''', 1)
+    # Prevent malformed matcher lookahead from spinning forever. Every pass
+    # must advance the iterator; a hard bound is a final guard for bad CFGs.
+    old='''\tAsmIterator insn(asm_insns.FirstPtr(), asm_insns.LastPtr());
+
+\thandlePrologue(insn, fnInfo->asmTexts.FirstStackLimitAddress());
+
+\tdo {
+\t\tbool ok = false;'''
+    new='''\tAsmIterator insn(asm_insns.FirstPtr(), asm_insns.LastPtr());
+
+\thandlePrologue(insn, fnInfo->asmTexts.FirstStackLimitAddress());
+
+\t// fler-dart: malformed/split CFGs must never make one function loop.
+\tsize_t iterations = 0;
+\tconst size_t max_iterations = asm_insns.Count() * 8 + 64;
+\tdo {
+\t\tif (++iterations > max_iterations) {
+\t\t\tstd::cerr << \"fler-dart: stop function parser at \" << std::hex
+\t\t\t          << fnInfo->dartFn.Address() << std::dec << \" (iteration guard)\\n\";
+\t\t\tbreak;
+\t\t}
+\t\tconst auto before_addr = insn.address();
+\t\tbool ok = false;'''
+    s=s.replace(old,new,1)
+    old2='''\t\tif (!ok) {
+\t\t\t// unhandle case
+\t\t\tauto ins = insn.Current();
+\t\t\tfnInfo->AddIL(std::make_unique<UnknownInstr>(ins, fnInfo->asmTexts.AtAddr(ins->address)));
+\t\t\t++insn;
+\t\t}
+\t} while (!insn.IsEnd());'''
+    new2='''\t\tif (!ok) {
+\t\t\t// unhandle case
+\t\t\tauto ins = insn.Current();
+\t\t\tfnInfo->AddIL(std::make_unique<UnknownInstr>(ins, fnInfo->asmTexts.AtAddr(ins->address)));
+\t\t\t++insn;
+\t\t}
+\t\t// A matcher returning IL without consuming input is a parser bug;
+\t\t// force progress while retaining the already-created IL.
+\t\tif (!insn.IsEnd() && insn.address() == before_addr) ++insn;
+\t} while (!insn.IsEnd());'''
+    s=s.replace(old2,new2,1)
+    return s
+
 def dartapp_h(s):
     # Keep a per-analysis visited set and expose concrete per-function errors.
     if "#include <unordered_set>" not in s:
@@ -201,6 +266,7 @@ def dartapp_cpp(s):
 
 edit("DartLoader.cpp", dartloader_cpp)
 edit("CodeAnalyzer_arm64.cpp", arm64_analyzer_tolerance)
+edit("CodeAnalyzer_arm64.cpp", arm64_analyzer_recovery)
 edit("CodeAnalyzer.h", codeanalyzer_h)
 edit("DartApp.h", dartapp_h)
 edit("DartApp.cpp", dartapp_cpp)
