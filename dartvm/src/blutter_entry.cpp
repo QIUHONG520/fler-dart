@@ -118,6 +118,13 @@ static void createTables() {
         ")"
     );
     g_db.exec(
+        "CREATE TABLE IF NOT EXISTS method_analysis ("
+        "  method_address INTEGER PRIMARY KEY,"
+        "  status TEXT NOT NULL,"
+        "  error TEXT"
+        ")"
+    );
+    g_db.exec(
         "CREATE TABLE IF NOT EXISTS asm_blocks ("
         "  id INTEGER PRIMARY KEY,"
         "  method_address INTEGER,"
@@ -176,6 +183,19 @@ static std::vector<DartLibrary*> exportLibraries(DartApp& app) {
     return out;
 }
 
+// Classify every exported method, including methods for which disassembly
+// failed or was intentionally disabled. This makes partial results explicit.
+static void writeMethodAnalysis() {
+    g_db.exec("DELETE FROM method_analysis");
+    g_db.exec(
+        "INSERT OR REPLACE INTO method_analysis(method_address,status,error) "
+        "SELECT address, CASE "
+        "WHEN size IS NULL OR size <= 0 THEN 'EMPTY' "
+        "WHEN src_code IS NOT NULL AND instr(src_code, '0x') > 0 THEN 'ANALYZED' "
+        "ELSE 'METADATA_ONLY' END, NULL FROM methods"
+    );
+}
+
 // Store factual coverage statistics instead of treating rc=0 as a complete
 // analysis. Values are text so this table remains forward/backward compatible.
 static void writeAnalysisMeta(bool noCodeAnalysis) {
@@ -210,7 +230,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
         put(key, std::to_string(n));
     };
 
-    put("engine_abi", "fler-dart-v0.5.7");
+    put("engine_abi", "fler-dart-v0.5.8");
 #ifdef DART_VERSION
     put("dart_version", DART_VERSION);
 #else
@@ -917,6 +937,7 @@ int blutter_analyze(const char* so_path, const char* db_path, const char* out_di
         }
         app.ExitScope();
 
+        writeMethodAnalysis();
 #ifndef NO_CODE_ANALYSIS
         writeAnalysisMeta(false);
 #else
