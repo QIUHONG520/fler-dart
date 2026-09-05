@@ -247,7 +247,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
         put(key, std::to_string(n));
     };
 
-    put("engine_abi", "fler-dart-v0.5.15");
+    put("engine_abi", "fler-dart-v0.5.16");
 #ifdef DART_VERSION
     put("dart_version", DART_VERSION);
 #else
@@ -263,6 +263,29 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
     put("total_methods", std::to_string(count("methods")));
     scalar("analyzed_methods", "src_code IS NOT NULL AND instr(src_code, '0x') > 0");
     scalar("metadata_only_methods", "src_code IS NULL OR instr(src_code, '0x') = 0");
+    auto statusCount = [&](const char* status) -> long long {
+        sqlite3_stmt* qst = nullptr;
+        long long n = 0;
+        if (sqlite3_prepare_v2(g_db.db,
+                "SELECT COUNT(*) FROM method_analysis WHERE status=?",
+                -1, &qst, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(qst, 1, status, -1, SQLITE_STATIC);
+            if (sqlite3_step(qst) == SQLITE_ROW) n = sqlite3_column_int64(qst, 0);
+        }
+        sqlite3_finalize(qst);
+        return n;
+    };
+    put("empty_methods", std::to_string(statusCount("EMPTY")));
+    put("failed_methods", std::to_string(noCodeAnalysis ? 0 : statusCount("METADATA_ONLY")));
+    put("unknown_functions", std::to_string(statusCount("UNKNOWN")));
+    sqlite3_stmt* errorStmt = nullptr;
+    long long errorCount = 0;
+    if (sqlite3_prepare_v2(g_db.db,
+            "SELECT COUNT(*) FROM method_analysis WHERE error IS NOT NULL AND error <> ''",
+            -1, &errorStmt, nullptr) == SQLITE_OK && sqlite3_step(errorStmt) == SQLITE_ROW)
+        errorCount = sqlite3_column_int64(errorStmt, 0);
+    sqlite3_finalize(errorStmt);
+    put("method_errors", std::to_string(errorCount));
     put("asm_blocks", std::to_string(count("asm_blocks")));
     put("pp_entries", std::to_string(count("pp_entries")));
     put("strings", std::to_string(count("strings")));
