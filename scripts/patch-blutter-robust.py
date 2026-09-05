@@ -52,7 +52,52 @@ def analyzer_cpp(s):
                 i + "\t          << std::dec << \" (\" << e.what() << \")\\n\";\n" + i + "}")
     return pat.sub(repl, s, count=1)
 
+
+def dartapp_h(s):
+    # Keep a per-analysis visited set so recursive const/object graphs cannot
+    # loop forever. The set is cleared by loadFromObjectPool().
+    if "fler-dart: walked object guard" in s:
+        return s
+    needle = "\tvoid walkObject(dart::Object& obj); // to check field types from existed object"
+    s = s.replace("#include <unordered_map>", "#include <unordered_map>\n#include <unordered_set>", 1)
+    replacement = needle + "\n\n\t// fler-dart: walked object guard\n\tstd::unordered_set<intptr_t> walked_objects;"
+    if needle not in s:
+        return s
+    return s.replace(needle, replacement, 1)
+
+def dartapp_cpp(s):
+    if "fler-dart: safe object walk" not in s:
+        old = "void DartApp::walkObject(dart::Object& obj)\n{\n\tauto cid = obj.GetClassId();"
+        new = ("void DartApp::walkObject(dart::Object& obj)\n{\n"
+               "\t// fler-dart: safe object walk; const graphs may contain cycles or\n"
+               "\t// objects whose CID is not represented in the current Dart VM table.\n"
+               "\tconst auto object_key = static_cast<intptr_t>(obj.ptr());\n"
+               "\tif (!walked_objects.insert(object_key).second) return;\n"
+               "\tauto cid = obj.GetClassId();")
+        s = s.replace(old, new, 1)
+    old = "\tASSERT(obj.IsInstance());\n\n\tauto dartCls = classes[cid];\n\tASSERT(dartCls);"
+    new = ("\tif (!obj.IsInstance()) return;\n"
+           "\tif (cid < 0 || static_cast<size_t>(cid) >= classes.size()) return;\n\n"
+           "\tauto dartCls = classes[cid];\n\tif (!dartCls) return;")
+    s = s.replace(old, new, 1)
+    old = "void DartApp::loadFromObjectPool()\n{\n\tconst auto& pool = GetObjectPool();"
+    new = ("void DartApp::loadFromObjectPool()\n{\n"
+           "\twalked_objects.clear();\n"
+           "\tconst auto& pool = GetObjectPool();")
+    s = s.replace(old, new, 1)
+    old = "\t\telse {\n\t\t\tthrow std::runtime_error(\"Unknown Object Pool entry type\");\n\t\t}"
+    new = ("\t\telse {\n"
+           "\t\t\t// Unknown entries are version-specific; preserve the rest of the\n"
+           "\t\t\t// snapshot instead of aborting the complete analysis.\n"
+           "\t\t\tstd::cerr << \"fler-dart: skip unknown object pool entry type=\"\n"
+           "\t\t\t          << static_cast<int>(objType) << \" index=\" << i << \"\\n\";\n"
+           "\t\t\tcontinue;\n\t\t}")
+    return s.replace(old, new, 1)
+
+
 edit("CodeAnalyzer.h", codeanalyzer_h)
+edit("DartApp.h", dartapp_h)
+edit("DartApp.cpp", dartapp_cpp)
 edit("CodeAnalyzer_arm64.cpp", arm64)
 edit("CodeAnalyzer.cpp", analyzer_cpp)
 print("fler-dart robust patches: " + (", ".join(changed) if changed else "already applied or no matching upstream pattern"))
