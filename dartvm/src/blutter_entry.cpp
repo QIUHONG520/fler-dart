@@ -273,7 +273,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
         put(key, std::to_string(n));
     };
 
-    put("engine_abi", "fler-dart-v0.5.25");
+    put("engine_abi", "fler-dart-v0.5.26");
 #ifdef DART_VERSION
     put("dart_version", DART_VERSION);
 #else
@@ -813,8 +813,6 @@ static void exportCallEdges(DartApp& app) {
                     sqlite3_clear_bindings(stmt);
                     sqlite3_bind_int64(stmt, 1, (int64_t)fn->Address());
                     sqlite3_bind_int64(stmt, 2, (int64_t)text.addr);
-                    if (direct) sqlite3_bind_int64(stmt, 3, (int64_t)targetAddress);
-                    else sqlite3_bind_null(stmt, 3);
                     sqlite3_bind_text(stmt, 4,
                         indirectCall ? "INDIRECT_CALL" : (indirectBranch ? "INDIRECT_BRANCH" : "RESOLVED_CALL"),
                         -1, SQLITE_STATIC);
@@ -831,14 +829,36 @@ static void exportCallEdges(DartApp& app) {
                             if (sqlite3_step(poolLookup) == SQLITE_ROW) {
                                 const auto* type = sqlite3_column_text(poolLookup, 0);
                                 const auto* value = sqlite3_column_text(poolLookup, 1);
-                                if (type) targetName = reinterpret_cast<const char*>(type);
-                                if (value) {
+                                const std::string poolType = type ? reinterpret_cast<const char*>(type) : std::string();
+                                const std::string poolValue = value ? reinterpret_cast<const char*>(value) : std::string();
+                                if (!poolType.empty()) targetName = poolType;
+                                if (!poolValue.empty()) {
                                     if (!targetName.empty()) targetName += ": ";
-                                    targetName += reinterpret_cast<const char*>(value);
+                                    targetName += poolValue;
+                                }
+                                // Some Blutter descriptions contain a Code/Stub/Function
+                                // address. Resolve it back through DartApp when possible.
+                                if (!target && (poolType.find("Code") != std::string::npos ||
+                                                poolType.find("Stub") != std::string::npos ||
+                                                poolType.find("Function") != std::string::npos)) {
+                                    uint64_t candidate = 0;
+                                    auto pos = poolValue.find("0x");
+                                    while (pos != std::string::npos) {
+                                        auto end = pos + 2;
+                                        while (end < poolValue.size() &&
+                                               std::isxdigit(static_cast<unsigned char>(poolValue[end]))) end++;
+                                        if (end > pos + 2) candidate = std::strtoull(poolValue.c_str() + pos + 2, nullptr, 16);
+                                        pos = poolValue.find("0x", end);
+                                    }
+                                    if (candidate) target = app.GetFunction(candidate);
+                                    if (target) targetName = target->FullName();
                                 }
                             }
                         }
                     } else sqlite3_bind_null(stmt, 6);
+                    if (direct || target) sqlite3_bind_int64(stmt, 3,
+                        (int64_t)(target ? target->Address() : targetAddress));
+                    else sqlite3_bind_null(stmt, 3);
                     if (targetName.empty()) sqlite3_bind_null(stmt, 5);
                     else sqlite3_bind_text(stmt, 5, targetName.c_str(), -1, SQLITE_TRANSIENT);
                     if (registerName.empty()) sqlite3_bind_null(stmt, 7);
