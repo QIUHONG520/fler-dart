@@ -273,7 +273,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
         put(key, std::to_string(n));
     };
 
-    put("engine_abi", "fler-dart-v0.5.31");
+    put("engine_abi", "fler-dart-v0.5.32");
 #ifdef DART_VERSION
     put("dart_version", DART_VERSION);
 #else
