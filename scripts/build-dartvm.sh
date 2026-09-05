@@ -525,7 +525,7 @@ if [ -f "$PACKAGES_LIB" ] && command -v file > /dev/null; then
     if echo "$FILE_OUT" | grep -qi "ARM\|aarch64"; then
         echo "Pre-built ARM64 Dart VM lib found: $PACKAGES_LIB"
         DARTVM_LIB="$PACKAGES_LIB"
-        DARTVM_INCLUDE_DIR="$PACKAGES_DIR/include/$DARMVM_LIB_NAME"
+        DARTVM_INCLUDE_DIR="$PACKAGES_DIR/include/dartvm${DART_VERSION}"
     else
         echo "Cached lib is not ARM64, will rebuild: $FILE_OUT"
     fi
