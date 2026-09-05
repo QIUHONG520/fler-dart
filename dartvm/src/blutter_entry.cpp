@@ -108,7 +108,13 @@ static void createTables() {
         "  address INTEGER NOT NULL,"
         "  size INTEGER,"
         "  src_code TEXT,"
-        "  UNIQUE(class_id, address)"
+        "  UNIQUE(class_id, name, address)"
+        ")"
+    );
+    g_db.exec(
+        "CREATE TABLE IF NOT EXISTS analysis_meta ("
+        "  key TEXT PRIMARY KEY,"
+        "  value TEXT NOT NULL"
         ")"
     );
     g_db.exec(
@@ -168,6 +174,63 @@ static std::vector<DartLibrary*> exportLibraries(DartApp& app) {
     if (native && std::find(out.begin(), out.end(), native) == out.end())
         out.push_back(native);
     return out;
+}
+
+// Store factual coverage statistics instead of treating rc=0 as a complete
+// analysis. Values are text so this table remains forward/backward compatible.
+static void writeAnalysisMeta(bool noCodeAnalysis) {
+    g_db.exec("DELETE FROM analysis_meta");
+    sqlite3_stmt* st = nullptr;
+    const char* sql = "INSERT OR REPLACE INTO analysis_meta(key,value) VALUES(?,?)";
+    if (sqlite3_prepare_v2(g_db.db, sql, -1, &st, nullptr) != SQLITE_OK) return;
+
+    auto put = [&](const char* key, const std::string& value) {
+        sqlite3_reset(st);
+        sqlite3_clear_bindings(st);
+        sqlite3_bind_text(st, 1, key, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 2, value.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(st);
+    };
+    auto count = [&](const char* table) -> long long {
+        std::string q = "SELECT COUNT(*) FROM " + std::string(table);
+        sqlite3_stmt* qst = nullptr;
+        long long n = 0;
+        if (sqlite3_prepare_v2(g_db.db, q.c_str(), -1, &qst, nullptr) == SQLITE_OK &&
+            sqlite3_step(qst) == SQLITE_ROW) n = sqlite3_column_int64(qst, 0);
+        sqlite3_finalize(qst);
+        return n;
+    };
+    auto scalar = [&](const char* key, const char* expression) {
+        std::string q = "SELECT COUNT(*) FROM methods WHERE " + std::string(expression);
+        sqlite3_stmt* qst = nullptr;
+        long long n = 0;
+        if (sqlite3_prepare_v2(g_db.db, q.c_str(), -1, &qst, nullptr) == SQLITE_OK &&
+            sqlite3_step(qst) == SQLITE_ROW) n = sqlite3_column_int64(qst, 0);
+        sqlite3_finalize(qst);
+        put(key, std::to_string(n));
+    };
+
+    put("engine_abi", "fler-dart-v0.5.7");
+#ifdef DART_VERSION
+    put("dart_version", DART_VERSION);
+#else
+    put("dart_version", "unknown");
+#endif
+#ifdef DART_COMPRESSED_POINTERS
+    put("compressed_pointers", "true");
+#else
+    put("compressed_pointers", "false");
+#endif
+    put("analysis_mode", noCodeAnalysis ? "metadata_only" : "code_analysis");
+    put("total_classes", std::to_string(count("classes")));
+    put("total_methods", std::to_string(count("methods")));
+    scalar("analyzed_methods", "src_code IS NOT NULL AND instr(src_code, '0x') > 0");
+    scalar("metadata_only_methods", "src_code IS NULL OR instr(src_code, '0x') = 0");
+    put("asm_blocks", std::to_string(count("asm_blocks")));
+    put("pp_entries", std::to_string(count("pp_entries")));
+    put("strings", std::to_string(count("strings")));
+    put("string_refs", std::to_string(count("string_refs")));
+    sqlite3_finalize(st);
 }
 
 // ─── 直接内存导出（方案 A）─────────────────────
@@ -854,6 +917,13 @@ int blutter_analyze(const char* so_path, const char* db_path, const char* out_di
         }
         app.ExitScope();
 
+#ifndef NO_CODE_ANALYSIS
+        writeAnalysisMeta(false);
+#else
+        writeAnalysisMeta(true);
+#endif
+        fprintf(stderr, "fler-dart: stage=analysis-meta-written\n");
+        fflush(stderr);
         g_db.close();
         fprintf(stderr, "fler-dart: stage=database-closed\n");
         fflush(stderr);
