@@ -129,6 +129,18 @@ static void createTables() {
         ")"
     );
     g_db.exec(
+        "CREATE TABLE IF NOT EXISTS call_edges ("
+        "  id INTEGER PRIMARY KEY,"
+        "  caller_address INTEGER NOT NULL,"
+        "  site_address INTEGER NOT NULL,"
+        "  callee_address INTEGER NOT NULL,"
+        "  kind TEXT NOT NULL,"
+        "  target_name TEXT,"
+        "  confidence INTEGER DEFAULT 100,"
+        "  UNIQUE(caller_address, site_address, callee_address, kind)"
+        ")"
+    );
+    g_db.exec(
         "CREATE TABLE IF NOT EXISTS asm_blocks ("
         "  id INTEGER PRIMARY KEY,"
         "  method_address INTEGER,"
@@ -292,6 +304,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
     put("pp_entries", std::to_string(count("pp_entries")));
     put("strings", std::to_string(count("strings")));
     put("string_refs", std::to_string(count("string_refs")));
+    put("call_edges", std::to_string(count("call_edges")));
     sqlite3_finalize(st);
 }
 
@@ -696,6 +709,46 @@ static void exportObjectPool(DartApp& app, DartDumper& dumper) {
             pp, strings, errors);
 }
 
+// Export resolved call sites directly from CodeAnalyzer metadata. This avoids
+// losing calls when the presentation text changes and preserves the target even
+// when Kotlin-side text parsing is unavailable.
+static void exportCallEdges(DartApp& app) {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(g_db.db,
+            "INSERT OR IGNORE INTO call_edges "
+            "(caller_address,site_address,callee_address,kind,target_name,confidence) "
+            "VALUES (?,?,?,?,?,?)", -1, &stmt, nullptr) != SQLITE_OK) return;
+    int edges = 0, errors = 0;
+    g_db.exec("BEGIN TRANSACTION");
+    for (auto* lib : exportLibraries(app)) {
+        if (!lib) continue;
+        for (auto* cls : lib->classes) {
+            if (!cls) continue;
+            for (auto* fn : cls->Functions()) {
+                if (!fn || !fn->GetAnalyzedData()) continue;
+                for (const auto& text : fn->GetAnalyzedData()->asmTexts.Data()) {
+                    if (text.dataType != AsmText::Call) continue;
+                    auto* target = app.GetFunction(text.callAddress);
+                    const std::string targetName = target ? target->FullName() : std::string();
+                    sqlite3_reset(stmt);
+                    sqlite3_clear_bindings(stmt);
+                    sqlite3_bind_int64(stmt, 1, (int64_t)fn->Address());
+                    sqlite3_bind_int64(stmt, 2, (int64_t)text.addr);
+                    sqlite3_bind_int64(stmt, 3, (int64_t)text.callAddress);
+                    sqlite3_bind_text(stmt, 4, "RESOLVED_CALL", -1, SQLITE_STATIC);
+                    sqlite3_bind_text(stmt, 5, targetName.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_int(stmt, 6, target ? 100 : 50);
+                    if (sqlite3_step(stmt) == SQLITE_DONE) edges++;
+                    else errors++;
+                }
+            }
+        }
+    }
+    g_db.exec("COMMIT");
+    sqlite3_finalize(stmt);
+    fprintf(stderr, "fler-dart: exported %d call edges (errors=%d)\n", edges, errors);
+}
+
 // 建立字符串到方法的交叉引用。AsmText::PoolOffset 是恢复后的真实 PP 槽偏移，
 // 与 strings.pp_offset 一一对应；用主键去重，避免同一方法重复引用造成计数膨胀。
 static void exportStringRefs(DartApp& app) {
@@ -969,7 +1022,8 @@ int blutter_analyze(const char* so_path, const char* db_path, const char* out_di
             exportObjectPool(app, dumper);
 #ifndef NO_CODE_ANALYSIS
             exportStringRefs(app);
-            // 标准引擎落地全部 Blutter 附加产物。安全引擎不生成 objs/IDA/Frida：
+            exportCallEdges(app);
+            // 标准引擎落地全部 Blutter 附加产物.安全引擎不生成 objs/IDA/Frida：
             // 这些并非数据库浏览必需，并且是旧 Dart 快照后处理崩溃的高风险区。
             std::string od = out_dir ? out_dir : "";
             if (!od.empty()) {
