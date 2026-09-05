@@ -260,7 +260,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
         put(key, std::to_string(n));
     };
 
-    put("engine_abi", "fler-dart-v0.5.17");
+    put("engine_abi", "fler-dart-v0.5.18");
 #ifdef DART_VERSION
     put("dart_version", DART_VERSION);
 #else
@@ -273,9 +273,23 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
 #endif
     put("analysis_mode", noCodeAnalysis ? "metadata_only" : "code_analysis");
     put("total_classes", std::to_string(count("classes")));
-    put("total_methods", std::to_string(count("methods")));
+    const auto totalMethods = count("methods");
+    put("total_methods", std::to_string(totalMethods));
     scalar("analyzed_methods", "src_code IS NOT NULL AND instr(src_code, '0x') > 0");
     scalar("metadata_only_methods", "src_code IS NULL OR instr(src_code, '0x') = 0");
+    sqlite3_stmt* coverageStmt = nullptr;
+    long long analyzedMethods = 0;
+    if (sqlite3_prepare_v2(g_db.db,
+            "SELECT COUNT(*) FROM methods WHERE src_code IS NOT NULL AND instr(src_code, '0x') > 0",
+            -1, &coverageStmt, nullptr) == SQLITE_OK && sqlite3_step(coverageStmt) == SQLITE_ROW)
+        analyzedMethods = sqlite3_column_int64(coverageStmt, 0);
+    sqlite3_finalize(coverageStmt);
+    const double coverage = totalMethods > 0
+        ? (100.0 * static_cast<double>(analyzedMethods) / static_cast<double>(totalMethods)) : 0.0;
+    char coverageText[32];
+    snprintf(coverageText, sizeof(coverageText), "%.2f", coverage);
+    put("coverage_percent", coverageText);
+    put("analysis_complete", (!noCodeAnalysis && analyzedMethods == totalMethods) ? "true" : "false");
     auto statusCount = [&](const char* status) -> long long {
         sqlite3_stmt* qst = nullptr;
         long long n = 0;
