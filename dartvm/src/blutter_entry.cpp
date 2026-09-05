@@ -246,7 +246,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
         put(key, std::to_string(n));
     };
 
-    put("engine_abi", "fler-dart-v0.5.12");
+    put("engine_abi", "fler-dart-v0.5.13");
 #ifdef DART_VERSION
     put("dart_version", DART_VERSION);
 #else
@@ -557,7 +557,14 @@ static void exportClassesAndMethods(DartApp& app, DartDumper& dumper) {
 // 空壳方法（无 AnalyzedData / 无指令）跳过——引擎无法恢复的数据不产生记录。
 static void exportAsmBlocks(DartApp& app, DartDumper& dumper) {
     const auto libs = exportLibraries(app);
-    int blocks = 0;
+    int blocks = 0, errors = 0;
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(g_db.db,
+            "INSERT INTO asm_blocks (method_address, size, url, body) VALUES (?,?,?,?)",
+            -1, &stmt, nullptr) != SQLITE_OK) {
+        fprintf(stderr, "fler-dart: prepare asm_blocks statement failed\n");
+        return;
+    }
     g_db.exec("BEGIN TRANSACTION");
     for (auto* lib : libs) {
         if (!lib) continue;
@@ -570,23 +577,20 @@ static void exportAsmBlocks(DartApp& app, DartDumper& dumper) {
                 if (!data || data->asmTexts.Data().empty()) continue;
                 const std::string body = buildFunctionAsmFull(fn, app, dumper, true);
                 if (body.empty()) continue;
-                sqlite3_stmt* st = nullptr;
-                if (sqlite3_prepare_v2(g_db.db,
-                    "INSERT INTO asm_blocks (method_address, size, url, body) VALUES (?,?,?,?)",
-                    -1, &st, nullptr) == SQLITE_OK) {
-                    sqlite3_bind_int64(st, 1, (int64_t)fn->Address());
-                    sqlite3_bind_int64(st, 2, (int64_t)fn->Size());
-                    sqlite3_bind_text(st, 3, url.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(st, 4, body.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_step(st);
-                }
-                sqlite3_finalize(st);
-                blocks++;
+                sqlite3_reset(stmt);
+                sqlite3_clear_bindings(stmt);
+                sqlite3_bind_int64(stmt, 1, (int64_t)fn->Address());
+                sqlite3_bind_int64(stmt, 2, (int64_t)fn->Size());
+                sqlite3_bind_text(stmt, 3, url.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 4, body.c_str(), -1, SQLITE_TRANSIENT);
+                if (sqlite3_step(stmt) == SQLITE_DONE) blocks++;
+                else errors++;
             }
         }
     }
     g_db.exec("COMMIT");
-    fprintf(stderr, "fler-dart: exported %d asm_blocks\n", blocks);
+    sqlite3_finalize(stmt);
+    fprintf(stderr, "fler-dart: exported %d asm_blocks (errors=%d)\n", blocks, errors);
 }
 
 // 导出 pp_entries + strings（复用 DartDumper 的对象池描述）
@@ -596,22 +600,38 @@ static void exportAsmBlocks(DartApp& app, DartDumper& dumper) {
 static void exportObjectPool(DartApp& app, DartDumper& dumper) {
     const auto& pool = app.GetObjectPool();
     intptr_t num = pool.Length();
-    int pp = 0, strings = 0;
-    g_db.exec("BEGIN TRANSACTION");
+    int pp = 0, strings = 0, errors = 0;
+    sqlite3_stmt* ppStmt = nullptr;
+    sqlite3_stmt* stringStmt = nullptr;
+    if (sqlite3_prepare_v2(g_db.db,
+            "INSERT OR IGNORE INTO pp_entries (pp_offset, type, value) VALUES (?,?,?)",
+            -1, &ppStmt, nullptr) != SQLITE_OK ||
+        sqlite3_prepare_v2(g_db.db,
+            "INSERT OR IGNORE INTO strings (pp_offset, value) VALUES (?,?)",
+            -1, &stringStmt, nullptr) != SQLITE_OK) {
+        fprintf(stderr, "fler-dart: prepare object pool statements failed\n");
+        sqlite3_finalize(ppStmt);
+        sqlite3_finalize(stringStmt);
+        return;
+    }
 
+    g_db.exec("BEGIN TRANSACTION");
     for (intptr_t i = 0; i < num; i++) {
         intptr_t offset = dart::ObjectPool::OffsetFromIndex(i) + 1;
-        std::string desc = dumper.FlPoolDescription(offset, false);
+        std::string desc;
+        try {
+            desc = dumper.FlPoolDescription(offset, false);
+        } catch (const std::exception& e) {
+            fprintf(stderr, "fler-dart: skip object pool index=%ld (%s)\n", (long)i, e.what());
+            errors++;
+            continue;
+        }
         if (desc.empty()) continue;
 
-        // 拆分 type / value（"Type: value" 形式）
-        // desc 形如 "[pp+0x58] String: "内容"" / "[pp+0x40] List(5) [..]" / "[pp+0x10] Stub: X (0x..)"
         std::string type, value;
         auto pos = desc.find(": ");
         if (pos != std::string::npos && pos > 0) {
             type = desc.substr(0, pos);
-            // 0.5.1 schema: type stores only the semantic type. The PP offset
-            // is already available in pp_offset and must not be duplicated here.
             if (type.rfind("[pp+", 0) == 0) {
                 const auto close = type.find(']');
                 if (close != std::string::npos) type = type.substr(close + 1);
@@ -619,49 +639,35 @@ static void exportObjectPool(DartApp& app, DartDumper& dumper) {
             }
             value = desc.substr(pos + 2);
         } else {
-            type = "";
             value = desc;
         }
 
-        // 判断是否为 String：描述含 "] String: "
-        bool isString = false;
-        {
-            auto sp = desc.find("] String: ");
-            isString = (sp != std::string::npos);
-        }
+        sqlite3_reset(ppStmt);
+        sqlite3_clear_bindings(ppStmt);
+        sqlite3_bind_int64(ppStmt, 1, (int64_t)offset);
+        sqlite3_bind_text(ppStmt, 2, type.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(ppStmt, 3, value.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(ppStmt) != SQLITE_DONE) errors++;
+        else pp++;
 
-        sqlite3_stmt* st = nullptr;
-        if (sqlite3_prepare_v2(g_db.db,
-            "INSERT OR IGNORE INTO pp_entries (pp_offset, type, value) VALUES (?,?,?)",
-            -1, &st, nullptr) == SQLITE_OK) {
-            sqlite3_bind_int64(st, 1, (int64_t)offset);
-            sqlite3_bind_text(st, 2, type.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(st, 3, value.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_step(st);
-        }
-        sqlite3_finalize(st);
-        pp++;
-
-        // String 类型同时进 strings 表（去掉引号）
+        const bool isString = desc.find("] String: ") != std::string::npos;
         if (isString) {
             std::string sv = value;
             if (sv.size() >= 2 && sv.front() == '"' && sv.back() == '"')
                 sv = sv.substr(1, sv.size() - 2);
-            sqlite3_stmt* s2 = nullptr;
-            if (sqlite3_prepare_v2(g_db.db,
-                "INSERT OR IGNORE INTO strings (pp_offset, value) VALUES (?,?)",
-                -1, &s2, nullptr) == SQLITE_OK) {
-                sqlite3_bind_int64(s2, 1, (int64_t)offset);
-                sqlite3_bind_text(s2, 2, sv.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_step(s2);
-            }
-            sqlite3_finalize(s2);
-            strings++;
+            sqlite3_reset(stringStmt);
+            sqlite3_clear_bindings(stringStmt);
+            sqlite3_bind_int64(stringStmt, 1, (int64_t)offset);
+            sqlite3_bind_text(stringStmt, 2, sv.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(stringStmt) != SQLITE_DONE) errors++;
+            else strings++;
         }
     }
-
     g_db.exec("COMMIT");
-    fprintf(stderr, "fler-dart: exported %d pp entries, %d strings\n", pp, strings);
+    sqlite3_finalize(ppStmt);
+    sqlite3_finalize(stringStmt);
+    fprintf(stderr, "fler-dart: exported %d pp entries, %d strings (errors=%d)\n",
+            pp, strings, errors);
 }
 
 // 建立字符串到方法的交叉引用。AsmText::PoolOffset 是恢复后的真实 PP 槽偏移，
