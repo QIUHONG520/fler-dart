@@ -273,7 +273,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
         put(key, std::to_string(n));
     };
 
-    put("engine_abi", "fler-dart-v0.5.26");
+    put("engine_abi", "fler-dart-v0.5.27");
 #ifdef DART_VERSION
     put("dart_version", DART_VERSION);
 #else
@@ -841,16 +841,31 @@ static void exportCallEdges(DartApp& app) {
                                 if (!target && (poolType.find("Code") != std::string::npos ||
                                                 poolType.find("Stub") != std::string::npos ||
                                                 poolType.find("Function") != std::string::npos)) {
-                                    uint64_t candidate = 0;
                                     auto pos = poolValue.find("0x");
-                                    while (pos != std::string::npos) {
+                                    while (pos != std::string::npos && !target) {
                                         auto end = pos + 2;
                                         while (end < poolValue.size() &&
                                                std::isxdigit(static_cast<unsigned char>(poolValue[end]))) end++;
-                                        if (end > pos + 2) candidate = std::strtoull(poolValue.c_str() + pos + 2, nullptr, 16);
+                                        if (end > pos + 2) {
+                                            const auto candidate = std::strtoull(poolValue.c_str() + pos + 2, nullptr, 16);
+                                            if (candidate) target = app.GetFunction(candidate);
+                                        }
                                         pos = poolValue.find("0x", end);
                                     }
-                                    if (candidate) target = app.GetFunction(candidate);
+                                    // Some SDK descriptions use address=12345 instead
+                                    // of hexadecimal notation. Only accept it when the
+                                    // value explicitly labels an address to avoid treating
+                                    // enum/list numbers as function addresses.
+                                    if (!target) {
+                                        const auto marker = poolValue.find("address=");
+                                        if (marker != std::string::npos) {
+                                            const auto begin = marker + 8;
+                                            char* endptr = nullptr;
+                                            const auto candidate = std::strtoull(poolValue.c_str() + begin, &endptr, 10);
+                                            if (endptr != poolValue.c_str() + begin && candidate)
+                                                target = app.GetFunction(candidate);
+                                        }
+                                    }
                                     if (target) targetName = target->FullName();
                                 }
                             }
