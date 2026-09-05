@@ -122,7 +122,8 @@ static void createTables() {
     );
     g_db.exec(
         "CREATE TABLE IF NOT EXISTS method_analysis ("
-        "  method_address INTEGER PRIMARY KEY,"
+        "  method_id INTEGER PRIMARY KEY,"
+        "  method_address INTEGER NOT NULL,"
         "  status TEXT NOT NULL,"
         "  error TEXT"
         ")"
@@ -191,8 +192,8 @@ static std::vector<DartLibrary*> exportLibraries(DartApp& app) {
 static void writeMethodAnalysis(DartApp& app) {
     g_db.exec("DELETE FROM method_analysis");
     g_db.exec(
-        "INSERT OR REPLACE INTO method_analysis(method_address,status,error) "
-        "SELECT address, CASE "
+        "INSERT OR REPLACE INTO method_analysis(method_id,method_address,status,error) "
+        "SELECT rowid, address, CASE "
         "WHEN size IS NULL OR size <= 0 THEN 'EMPTY' "
         "WHEN src_code IS NOT NULL AND instr(src_code, '0x') > 0 THEN 'ANALYZED' "
         "ELSE 'METADATA_ONLY' END, NULL FROM methods"
@@ -246,7 +247,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
         put(key, std::to_string(n));
     };
 
-    put("engine_abi", "fler-dart-v0.5.14");
+    put("engine_abi", "fler-dart-v0.5.15");
 #ifdef DART_VERSION
     put("dart_version", DART_VERSION);
 #else
