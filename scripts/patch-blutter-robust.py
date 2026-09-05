@@ -221,6 +221,15 @@ def arm64_analyzer_recovery(s):
     s=s.replace(old2,new2,1)
     return s
 
+
+def no_cptr_array_tolerance(s):
+    # In no_cptr snapshots the effective array payload offset can differ from
+    # compressed-layout constants. getArrayOp already identified the operation,
+    # so retain generic array IL instead of rejecting it.
+    old = "\t\t\tbool isTypedData = dart::UntaggedTypedData::payload_offset() - dart::kHeapObjectTag == arr_data_offset;\n\t\t\tINSN_ASSERT(isTypedData || arr_data_offset == dart::Array::data_offset() - dart::kHeapObjectTag);"
+    new = "\t\t\t// fler-dart: no_cptr may use a different effective payload offset;\n\t\t\t// ArrayOp classification is still valid, so do not abort the matcher."
+    return s.replace(old, new, 1)
+
 def dartapp_h(s):
     # Keep a per-analysis visited set and expose concrete per-function errors.
     if "#include <unordered_set>" not in s:
@@ -267,6 +276,7 @@ def dartapp_cpp(s):
 edit("DartLoader.cpp", dartloader_cpp)
 edit("CodeAnalyzer_arm64.cpp", arm64_analyzer_tolerance)
 edit("CodeAnalyzer_arm64.cpp", arm64_analyzer_recovery)
+edit("CodeAnalyzer_arm64.cpp", no_cptr_array_tolerance)
 edit("CodeAnalyzer.h", codeanalyzer_h)
 edit("DartApp.h", dartapp_h)
 edit("DartApp.cpp", dartapp_cpp)
