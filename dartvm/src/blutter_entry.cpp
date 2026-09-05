@@ -133,9 +133,11 @@ static void createTables() {
         "  id INTEGER PRIMARY KEY,"
         "  caller_address INTEGER NOT NULL,"
         "  site_address INTEGER NOT NULL,"
-        "  callee_address INTEGER NOT NULL,"
+        "  callee_address INTEGER,"
         "  kind TEXT NOT NULL,"
         "  target_name TEXT,"
+        "  pool_offset INTEGER,"
+        "  register_name TEXT,"
         "  confidence INTEGER DEFAULT 100,"
         "  UNIQUE(caller_address, site_address, callee_address, kind)"
         ")"
@@ -186,6 +188,17 @@ static void createTables() {
         "  PRIMARY KEY (class_name, enum_index)"
         ")"
     );
+    // Query-heavy UI/MCP paths must not scan large analysis tables.
+    g_db.exec("CREATE INDEX IF NOT EXISTS idx_methods_address ON methods(address)");
+    g_db.exec("CREATE INDEX IF NOT EXISTS idx_methods_name ON methods(name)");
+    g_db.exec("CREATE INDEX IF NOT EXISTS idx_methods_class ON methods(class_id)");
+    g_db.exec("CREATE INDEX IF NOT EXISTS idx_asm_method ON asm_blocks(method_address)");
+    g_db.exec("CREATE INDEX IF NOT EXISTS idx_method_analysis_status ON method_analysis(status)");
+    g_db.exec("CREATE INDEX IF NOT EXISTS idx_method_analysis_address ON method_analysis(method_address)");
+    g_db.exec("CREATE INDEX IF NOT EXISTS idx_string_refs_method ON string_refs(method_address)");
+    g_db.exec("CREATE INDEX IF NOT EXISTS idx_call_edges_caller ON call_edges(caller_address)");
+    g_db.exec("CREATE INDEX IF NOT EXISTS idx_call_edges_callee ON call_edges(callee_address)");
+    g_db.exec("CREATE INDEX IF NOT EXISTS idx_call_edges_site ON call_edges(site_address)");
 }
 
 // Include the synthetic/native library as well. Obfuscated AOT snapshots can
@@ -260,7 +273,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
         put(key, std::to_string(n));
     };
 
-    put("engine_abi", "fler-dart-v0.5.18");
+    put("engine_abi", "fler-dart-v0.5.19");
 #ifdef DART_VERSION
     put("dart_version", DART_VERSION);
 #else
