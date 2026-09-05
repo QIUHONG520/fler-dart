@@ -97,6 +97,65 @@ def function_size_guard(s):
         "if (dartFn->Size() == 0)",
         "if (dartFn->Size() <= 0 || dartFn->Size() > 0x1000000)")
 
+
+def dartloader_cpp(s):
+    # The Android worker is short-lived. Dart_Cleanup is process-global and
+    # crashes with some snapshot revisions after successful export; the worker
+    # is killed after writing its result, so let the OS reclaim VM state.
+    old = """void DartLoader::Unload()
+{
+\tif (Dart_CurrentIsolate() != nullptr) {
+\t\tDart_ShutdownIsolate();
+\t}
+\tignore_result(Dart_Cleanup());
+}"""
+    new = """void DartLoader::Unload()
+{
+\t// fler-dart: the Android analysis worker is short-lived and is terminated
+\t// after the result file is written. Do not shut down or globally clean the
+\t// Dart VM from DartApp's destructor: Dart 2.14/3.6 can crash while tearing
+\t// down snapshot-owned isolate state after a successful export. Leaking this
+\t// process-local VM is intentional; the OS reclaims it on worker exit.
+}"""
+    return s.replace(old, new, 1)
+
+
+def arm64_analyzer_tolerance(s):
+    # A split CFG can enter an epilogue without the linear scanner having seen
+    # EnterFrame. The epilogue itself is enough evidence for this flag.
+    s = s.replace("""\t\tINSN_ASSERT(fnInfo->useFramePointer);
+\t\tconst auto ins0_addr""", """\t\t// Dart 3.6 may enter through a split basic block.
+\t\tfnInfo->useFramePointer = true;
+\t\tconst auto ins0_addr""", 1)
+    # Do not throw when the stack-limit sequence crosses a basic-block edge.
+    s = s.replace("""\t\t// cmp SP, TMP
+INSN_ASSERT(insn.id() == ARM64_INS_CMP);
+INSN_ASSERT(insn.ops(0).reg == CSREG_DART_SP);
+INSN_ASSERT(insn.ops(1).reg == CSREG_DART_TMP);
+++insn;
+
+INSN_ASSERT(insn.id() == ARM64_INS_B);
+INSN_ASSERT(insn.ops(0).type == ARM64_OP_IMM);
+uint64_t target = (uint64_t)insn.ops(0).imm;""", """\t\t// cmp SP, TMP. If it is not adjacent, leave the iterator untouched
+\t\t// and let the generic parser handle the valid instructions.
+\t\tif (insn.id() != ARM64_INS_CMP ||
+\t\t\tinsn.ops(0).reg != CSREG_DART_SP ||
+\t\t\tinsn.ops(1).reg != CSREG_DART_TMP) return nullptr;
+\t\t++insn;
+
+\t\tif (insn.id() != ARM64_INS_B || insn.ops(0).type != ARM64_OP_IMM)
+\t\t\treturn nullptr;
+\t\tuint64_t target = (uint64_t)insn.ops(0).imm;""", 1)
+    # ADD PP, #imm followed by a branch is not an adjacent pool load.
+    s = s.replace("""\t\t\telse {
+\t\t\t\tINSN_ASSERT(false);
+\t\t\t}
+\t\t\tdstReg = A64::Register{ insn.ops(0).reg };""", """\t\t\telse {
+\t\t\t\treturn ObjectPoolInstr{};
+\t\t\t}
+\t\t\tdstReg = A64::Register{ insn.ops(0).reg };""", 1)
+    return s
+
 def dartapp_h(s):
     # Keep a per-analysis visited set and expose concrete per-function errors.
     if "#include <unordered_set>" not in s:
@@ -140,6 +199,8 @@ def dartapp_cpp(s):
     return s.replace(old, new, 1)
 
 
+edit("DartLoader.cpp", dartloader_cpp)
+edit("CodeAnalyzer_arm64.cpp", arm64_analyzer_tolerance)
 edit("CodeAnalyzer.h", codeanalyzer_h)
 edit("DartApp.h", dartapp_h)
 edit("DartApp.cpp", dartapp_cpp)

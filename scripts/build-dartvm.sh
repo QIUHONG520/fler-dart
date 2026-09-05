@@ -731,13 +731,10 @@ if ! grep -q "AsTruncatedInt64Value()" "$DART_VM_INC/object.h"; then
     VERSION_DEFINES="$VERSION_DEFINES -DUNIFORM_INTEGER_ACCESS=ON"
 fi
 
-# Dart < 2.15 无压缩指针：blutter.py 对该版本强制 no-analysis（Blutter CodeAnalyzer
-# 不支持 no-compressed 指针的代码反汇编，强行跑会段错误）。fler-dart 引擎同样跳过
-# CodeAnalyzer，只做快照加载 + 对象池/类/方法导出（方法反汇编留空、asm_blocks 不产出）。
-# 见 blutter.py: `if int(vers[0]) == 2 and int(vers[1]) < 15: no_analysis = True`。
-if [ "$VER_MAJOR" -eq 2 ] && [ "$VER_MINOR" -lt 15 ]; then
-    VERSION_DEFINES="$VERSION_DEFINES -DNO_CODE_ANALYSIS=ON"
-fi
+# Dart 2.14.x uses non-compressed pointers, but fler-dart provides a dedicated
+# no_cptr build. Keep CodeAnalyzer enabled: disabling it makes the analysis
+# structurally incomplete (no asm, method status, or call edges).
+# The ARM64 parser uses version/layout guards and falls back per function.
 
 echo "Version defines: $VERSION_DEFINES"
 

@@ -273,7 +273,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
         put(key, std::to_string(n));
     };
 
-    put("engine_abi", "fler-dart-v0.5.29");
+    put("engine_abi", "fler-dart-v0.5.30");
 #ifdef DART_VERSION
     put("dart_version", DART_VERSION);
 #else
@@ -1201,9 +1201,12 @@ int blutter_analyze(const char* so_path, const char* db_path, const char* out_di
         removeDir(tmpdir); return -2;
     }
 
-    // Leave the worker thread with no current isolate so the next analysis on
-    // the same thread can create a fresh one (vm-reuse keeps the VM alive).
-    detachLeftoverIsolate();
+    // The Android analysis worker is intentionally short-lived. Do not tear
+    // down the snapshot isolate here: Dart 2.14/3.6 can crash in shutdown
+    // after a successful export, and EngineAnalysisService terminates the
+    // worker immediately after receiving this return value.
+    fprintf(stderr, "fler-dart: cleanup deferred to worker exit\n");
+    fflush(stderr);
 
     removeDir(tmpdir);
     fprintf(stderr, "fler-dart: done, db = %s\n", db_path);
