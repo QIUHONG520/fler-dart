@@ -90,6 +90,13 @@ def analyzer_cpp(s):
     return out
 
 
+def function_size_guard(s):
+    # A corrupt Code::Size() can make Capstone read far beyond the mapped
+    # executable range. Bound analysis work before the disassembler is called.
+    return s.replace(
+        "if (dartFn->Size() == 0)",
+        "if (dartFn->Size() <= 0 || dartFn->Size() > 0x1000000)")
+
 def dartapp_h(s):
     # Keep a per-analysis visited set and expose concrete per-function errors.
     if "#include <unordered_set>" not in s:
@@ -138,4 +145,5 @@ edit("DartApp.h", dartapp_h)
 edit("DartApp.cpp", dartapp_cpp)
 edit("CodeAnalyzer_arm64.cpp", arm64)
 edit("CodeAnalyzer.cpp", analyzer_cpp)
+edit("CodeAnalyzer.cpp", function_size_guard)
 print("fler-dart robust patches: " + (", ".join(changed) if changed else "already applied or no matching upstream pattern"))
