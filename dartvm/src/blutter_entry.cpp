@@ -185,7 +185,7 @@ static std::vector<DartLibrary*> exportLibraries(DartApp& app) {
 
 // Classify every exported method, including methods for which disassembly
 // failed or was intentionally disabled. This makes partial results explicit.
-static void writeMethodAnalysis() {
+static void writeMethodAnalysis(DartApp& app) {
     g_db.exec("DELETE FROM method_analysis");
     g_db.exec(
         "INSERT OR REPLACE INTO method_analysis(method_address,status,error) "
@@ -194,6 +194,19 @@ static void writeMethodAnalysis() {
         "WHEN src_code IS NOT NULL AND instr(src_code, '0x') > 0 THEN 'ANALYZED' "
         "ELSE 'METADATA_ONLY' END, NULL FROM methods"
     );
+    sqlite3_stmt* update = nullptr;
+    if (sqlite3_prepare_v2(g_db.db,
+        "UPDATE method_analysis SET error=? WHERE method_address=?",
+        -1, &update, nullptr) == SQLITE_OK) {
+        for (const auto& [address, error] : app.fler_analysis_errors()) {
+            sqlite3_reset(update);
+            sqlite3_clear_bindings(update);
+            sqlite3_bind_text(update, 1, error.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(update, 2, static_cast<sqlite3_int64>(address));
+            sqlite3_step(update);
+        }
+    }
+    sqlite3_finalize(update);
 }
 
 // Store factual coverage statistics instead of treating rc=0 as a complete
@@ -230,7 +243,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
         put(key, std::to_string(n));
     };
 
-    put("engine_abi", "fler-dart-v0.5.9");
+    put("engine_abi", "fler-dart-v0.5.11");
 #ifdef DART_VERSION
     put("dart_version", DART_VERSION);
 #else
@@ -937,7 +950,7 @@ int blutter_analyze(const char* so_path, const char* db_path, const char* out_di
         }
         app.ExitScope();
 
-        writeMethodAnalysis();
+        writeMethodAnalysis(app);
 #ifndef NO_CODE_ANALYSIS
         writeAnalysisMeta(false);
 #else

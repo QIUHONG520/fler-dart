@@ -75,20 +75,33 @@ def analyzer_cpp(s):
 \t}
 '''
             out = out[:end] + native + out[end:]
+    # Record concrete C++ exceptions for method_analysis.error.
+    if "analysis_errors[dartFn->Address()]" not in out:
+        out = out.replace(
+            'std::cerr << "fler-dart: skip function " << std::hex << dartFn->Address()\n',
+            'app.analysis_errors[dartFn->Address()] = e.what();\n'
+            '                    std::cerr << "fler-dart: skip function " << std::hex << dartFn->Address()\n',
+            1)
+        out = out.replace(
+            'std::cerr << "fler-dart: skip native function " << std::hex << dartFn->Address()\n',
+            'app.analysis_errors[dartFn->Address()] = e.what();\n'
+            '                std::cerr << "fler-dart: skip native function " << std::hex << dartFn->Address()\n',
+            1)
     return out
 
 
 def dartapp_h(s):
-    # Keep a per-analysis visited set so recursive const/object graphs cannot
-    # loop forever. The set is cleared by loadFromObjectPool().
-    if "fler-dart: walked object guard" in s:
-        return s
+    # Keep a per-analysis visited set and expose concrete per-function errors.
+    if "#include <unordered_set>" not in s:
+        s = s.replace("#include <unordered_map>", "#include <unordered_map>\n#include <unordered_set>", 1)
     needle = "\tvoid walkObject(dart::Object& obj); // to check field types from existed object"
-    s = s.replace("#include <unordered_map>", "#include <unordered_map>\n#include <unordered_set>", 1)
-    replacement = needle + "\n\n\t// fler-dart: walked object guard\n\tstd::unordered_set<intptr_t> walked_objects;"
-    if needle not in s:
-        return s
-    return s.replace(needle, replacement, 1)
+    if "fler-dart: walked object guard" not in s and needle in s:
+        replacement = needle + "\n\n\t// fler-dart: walked object guard\n\tstd::unordered_set<intptr_t> walked_objects;\n\tstd::unordered_map<uint64_t, std::string> analysis_errors;"
+        s = s.replace(needle, replacement, 1)
+    accessor = "\tconst std::unordered_map<uint64_t, std::string>& fler_analysis_errors() const { return analysis_errors; }"
+    if "fler_analysis_errors" not in s and "fler_libs()" in s:
+        s = s.replace("\tconst std::vector<DartLibrary*>& fler_libs() const { return libs; }", "\tconst std::vector<DartLibrary*>& fler_libs() const { return libs; }\n" + accessor, 1)
+    return s
 
 def dartapp_cpp(s):
     if "fler-dart: safe object walk" not in s:
