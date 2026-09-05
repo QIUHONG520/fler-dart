@@ -273,7 +273,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
         put(key, std::to_string(n));
     };
 
-    put("engine_abi", "fler-dart-v0.5.22");
+    put("engine_abi", "fler-dart-v0.5.23");
 #ifdef DART_VERSION
     put("dart_version", DART_VERSION);
 #else
@@ -755,6 +755,7 @@ static void exportCallEdges(DartApp& app) {
                 if (!fn || !fn->GetAnalyzedData()) continue;
                 bool hasPendingPool = false;
                 uint64_t pendingPool = 0;
+                std::string pendingPoolRegister;
                 unsigned pendingPoolAge = 0;
                 for (const auto& text : fn->GetAnalyzedData()->asmTexts.Data()) {
                     const std::string raw(text.text);
@@ -763,8 +764,19 @@ static void exportCallEdges(DartApp& app) {
                         hasPendingPool = true;
                         pendingPool = text.poolOffset;
                         pendingPoolAge = 0;
+                        pendingPoolRegister.clear();
+                        const auto space = raw.find(' ');
+                        const auto comma = raw.find(',', space == std::string::npos ? 0 : space + 1);
+                        if (space != std::string::npos) {
+                            const auto end = comma == std::string::npos ? raw.size() : comma;
+                            pendingPoolRegister = raw.substr(space + 1, end - space - 1);
+                            while (!pendingPoolRegister.empty() && pendingPoolRegister.back() == ' ') pendingPoolRegister.pop_back();
+                        }
                     }
-                    if (hasPendingPool && pendingPoolAge > 4) hasPendingPool = false;
+                    if (hasPendingPool && pendingPoolAge > 4) {
+                        hasPendingPool = false;
+                        pendingPoolRegister.clear();
+                    }
                     const bool direct = text.dataType == AsmText::Call;
                     const bool indirectCall = raw.rfind("blr", 0) == 0;
                     const bool indirectBranch = raw.rfind("br", 0) == 0 && !indirectCall;
@@ -789,8 +801,11 @@ static void exportCallEdges(DartApp& app) {
                         -1, SQLITE_STATIC);
                     if (targetName.empty()) sqlite3_bind_null(stmt, 5);
                     else sqlite3_bind_text(stmt, 5, targetName.c_str(), -1, SQLITE_TRANSIENT);
-                    if (indirect && hasPendingPool && pendingPoolAge <= 4)
-                        sqlite3_bind_int64(stmt, 6, (int64_t)pendingPool);
+                    std::string indirectRegister = registerName;
+                    while (!indirectRegister.empty() && indirectRegister.front() == ' ') indirectRegister.erase(0, 1);
+                    const bool poolRegisterMatch = indirect && hasPendingPool &&
+                        !pendingPoolRegister.empty() && indirectRegister == pendingPoolRegister;
+                    if (poolRegisterMatch) sqlite3_bind_int64(stmt, 6, (int64_t)pendingPool);
                     else sqlite3_bind_null(stmt, 6);
                     if (registerName.empty()) sqlite3_bind_null(stmt, 7);
                     else sqlite3_bind_text(stmt, 7, registerName.c_str(), -1, SQLITE_TRANSIENT);
