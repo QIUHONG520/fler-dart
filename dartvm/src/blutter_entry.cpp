@@ -159,6 +159,17 @@ static void createTables() {
     );
 }
 
+// Include the synthetic/native library as well. Obfuscated AOT snapshots can
+// contain code objects whose owner is not recoverable; DartApp stores those
+// functions under nativeLib instead of the normal library vector.
+static std::vector<DartLibrary*> exportLibraries(DartApp& app) {
+    std::vector<DartLibrary*> out = app.fler_libs();
+    auto* native = app.fler_native_lib();
+    if (native && std::find(out.begin(), out.end(), native) == out.end())
+        out.push_back(native);
+    return out;
+}
+
 // ─── 直接内存导出（方案 A）─────────────────────
 
 // ─── 完整反汇编生成（双轨）─────────────────────
@@ -366,7 +377,7 @@ static void extractEnumMap(const std::string& dump, const std::string& clsName,
 
 // 导出 classes + methods（直接遍历 DartApp 内存结构）
 static void exportClassesAndMethods(DartApp& app, DartDumper& dumper) {
-    const auto& libs = app.fler_libs();
+    const auto libs = exportLibraries(app);
     int classes = 0, methods = 0;
     g_db.exec("BEGIN TRANSACTION");
 
@@ -447,7 +458,7 @@ static void exportClassesAndMethods(DartApp& app, DartDumper& dumper) {
 // url（来源库名）、body（完整语义反汇编，与 asm/*.dart 内容一致）。
 // 空壳方法（无 AnalyzedData / 无指令）跳过——引擎无法恢复的数据不产生记录。
 static void exportAsmBlocks(DartApp& app, DartDumper& dumper) {
-    const auto& libs = app.fler_libs();
+    const auto libs = exportLibraries(app);
     int blocks = 0;
     g_db.exec("BEGIN TRANSACTION");
     for (auto* lib : libs) {

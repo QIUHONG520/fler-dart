@@ -310,6 +310,7 @@ s = open(path, encoding='utf-8').read()
 accessor = (
     "\n\t// fler-dart: accessors for direct in-memory DB export\n"
     "\tconst std::vector<DartLibrary*>& fler_libs() const { return libs; }\n"
+    "\tDartLibrary* fler_native_lib() { return &nativeLib; }\n"
     "\n"
 )
 needle = "\nprivate:\n"
@@ -317,6 +318,20 @@ assert needle in s, "DartApp.h private: marker not found"
 s = s.replace(needle, accessor + needle, 1)
 open(path, 'w', encoding='utf-8').write(s)
 print("  DartApp.h: fler_libs() accessor added")
+PYEOF
+fi
+
+# Upgrade an older cached patch tree that already has fler_libs().
+if grep -q "fler_libs" "$BLUTTER_DARTAPP_H" 2>/dev/null && ! grep -q "fler_native_lib" "$BLUTTER_DARTAPP_H" 2>/dev/null; then
+    python3 - "$BLUTTER_DARTAPP_H" << 'PYEOF'
+import sys
+path = sys.argv[1]
+s = open(path, encoding="utf-8").read()
+needle = "\tconst std::vector<DartLibrary*>& fler_libs() const { return libs; }"
+assert needle in s, "fler_libs accessor not found"
+s = s.replace(needle, needle + "\n\tDartLibrary* fler_native_lib() { return &nativeLib; }", 1)
+open(path, "w", encoding="utf-8").write(s)
+print("  DartApp.h: fler_native_lib() accessor added")
 PYEOF
 fi
 
@@ -499,7 +514,7 @@ export FLER_NDK="$NDK_PATH"
 SNAPSHOT_HASH=""
 DARMVM_LIB_NAME="dartvm${DART_VERSION}_android_arm64"
 PACKAGES_DIR="$BLUTTER_DIR/packages"
-PACKAGES_LIB="$PACKAGES_DIR/lib/$DARMVM_LIB_NAME/lib$DARMVM_LIB_NAME.a"
+PACKAGES_LIB="$PACKAGES_DIR/lib/lib${DARMVM_LIB_NAME}.a"
 
 DARTVM_LIB=""
 DARTVM_INCLUDE_DIR=""
@@ -527,13 +542,13 @@ if [ -d "$BLUTTER_BUILD_DIR" ]; then
 fi
 if [ -f "$PACKAGES_LIB" ]; then
     echo "Removing stale cached lib: $PACKAGES_LIB"
-    rm -f "$PACKAGES_DIR/lib/$DARMVM_LIB_NAME"/*.a
+    rm -f "$PACKAGES_LIB"
 fi
 
 python3 dartvm_fetch_build.py "$DART_VERSION" android arm64
 
-    DARTVM_LIB=$(find "$PACKAGES_DIR/lib" -name "*.a" 2>/dev/null | head -1 || true)
-    DARTVM_INCLUDE_DIR=$(find "$PACKAGES_DIR/include" -maxdepth 1 -type d -name "dartvm*" 2>/dev/null | head -1 || true)
+    DARTVM_LIB="$PACKAGES_LIB"
+    DARTVM_INCLUDE_DIR="$PACKAGES_DIR/include/dartvm${DART_VERSION}"
 fi
 
 if [ -z "$DARTVM_LIB" ] || [ ! -f "$DARTVM_LIB" ]; then
@@ -617,6 +632,10 @@ for name in ("CodeAnalyzer.cpp", "CodeAnalyzer_arm64.cpp"):
         open(path, "w", encoding="utf-8").writelines(out)
 print(f"  write-barrier assertion guards added: {count}")
 PYEOF
+
+# Apply bounds checks and per-function exception recovery after all Blutter
+# compatibility patches have been applied.
+python3 "$REPO_DIR/scripts/patch-blutter-robust.py" "$BLUTTER_SRC_DIR"
 
 # ═══════════════════════════════════════════════
 # Step 1h: Patch DartLoader isolate lifecycle

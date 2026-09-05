@@ -1,15 +1,11 @@
 name: Build dartvm (v5 — Static Capstone)
 
 on:
+  # 源码推送不自动触发全版本构建；开发测试请使用 workflow_dispatch 指定 Dart 版本。
+  # 只有显式创建 v* 标签时才走发布构建。
   push:
-    branches: [main]
     tags:
       - 'v*'
-    # 回写 version.json / manifest.json 到 main 时不重新触发全量构建（paths 过滤对 tag 推送不生效）
-    paths-ignore:
-      - 'version.json'
-      - 'manifest.json'
-      - 'dist/**'
   workflow_dispatch:
     inputs:
       dart-versions:
