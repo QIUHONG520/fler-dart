@@ -273,7 +273,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
         put(key, std::to_string(n));
     };
 
-    put("engine_abi", "fler-dart-v0.5.23");
+    put("engine_abi", "fler-dart-v0.5.24");
 #ifdef DART_VERSION
     put("dart_version", DART_VERSION);
 #else
@@ -332,6 +332,21 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
     put("strings", std::to_string(count("strings")));
     put("string_refs", std::to_string(count("string_refs")));
     put("call_edges", std::to_string(count("call_edges")));
+    auto edgeKindCount = [&](const char* kind) -> long long {
+        sqlite3_stmt* qst = nullptr;
+        long long n = 0;
+        if (sqlite3_prepare_v2(g_db.db,
+                "SELECT COUNT(*) FROM call_edges WHERE kind=?",
+                -1, &qst, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(qst, 1, kind, -1, SQLITE_STATIC);
+            if (sqlite3_step(qst) == SQLITE_ROW) n = sqlite3_column_int64(qst, 0);
+        }
+        sqlite3_finalize(qst);
+        return n;
+    };
+    put("resolved_call_edges", std::to_string(edgeKindCount("RESOLVED_CALL")));
+    put("indirect_call_edges", std::to_string(edgeKindCount("INDIRECT_CALL")));
+    put("indirect_branch_edges", std::to_string(edgeKindCount("INDIRECT_BRANCH")));
     sqlite3_finalize(st);
 }
 
