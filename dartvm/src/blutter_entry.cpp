@@ -273,7 +273,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
         put(key, std::to_string(n));
     };
 
-    put("engine_abi", "fler-dart-v0.5.24");
+    put("engine_abi", "fler-dart-v0.5.25");
 #ifdef DART_VERSION
     put("dart_version", DART_VERSION);
 #else
@@ -760,6 +760,10 @@ static void exportCallEdges(DartApp& app) {
             "INSERT OR IGNORE INTO call_edges "
             "(caller_address,site_address,callee_address,kind,target_name,pool_offset,register_name,confidence) "
             "VALUES (?,?,?,?,?,?,?,?)", -1, &stmt, nullptr) != SQLITE_OK) return;
+    sqlite3_stmt* poolLookup = nullptr;
+    sqlite3_prepare_v2(g_db.db,
+        "SELECT type, value FROM pp_entries WHERE pp_offset=? LIMIT 1",
+        -1, &poolLookup, nullptr);
     int edges = 0, errors = 0;
     g_db.exec("BEGIN TRANSACTION");
     for (auto* lib : exportLibraries(app)) {
@@ -799,7 +803,7 @@ static void exportCallEdges(DartApp& app) {
                     if (!direct && !indirect) continue;
                     const uint64_t targetAddress = direct ? text.callAddress : 0;
                     auto* target = direct ? app.GetFunction(targetAddress) : nullptr;
-                    const std::string targetName = target ? target->FullName() : std::string();
+                    std::string targetName = target ? target->FullName() : std::string();
                     std::string registerName;
                     if (indirect) {
                         const auto space = raw.find(' ');
@@ -814,17 +818,32 @@ static void exportCallEdges(DartApp& app) {
                     sqlite3_bind_text(stmt, 4,
                         indirectCall ? "INDIRECT_CALL" : (indirectBranch ? "INDIRECT_BRANCH" : "RESOLVED_CALL"),
                         -1, SQLITE_STATIC);
-                    if (targetName.empty()) sqlite3_bind_null(stmt, 5);
-                    else sqlite3_bind_text(stmt, 5, targetName.c_str(), -1, SQLITE_TRANSIENT);
                     std::string indirectRegister = registerName;
                     while (!indirectRegister.empty() && indirectRegister.front() == ' ') indirectRegister.erase(0, 1);
                     const bool poolRegisterMatch = indirect && hasPendingPool &&
                         !pendingPoolRegister.empty() && indirectRegister == pendingPoolRegister;
-                    if (poolRegisterMatch) sqlite3_bind_int64(stmt, 6, (int64_t)pendingPool);
-                    else sqlite3_bind_null(stmt, 6);
+                    if (poolRegisterMatch) {
+                        sqlite3_bind_int64(stmt, 6, (int64_t)pendingPool);
+                        if (poolLookup) {
+                            sqlite3_reset(poolLookup);
+                            sqlite3_clear_bindings(poolLookup);
+                            sqlite3_bind_int64(poolLookup, 1, (int64_t)pendingPool);
+                            if (sqlite3_step(poolLookup) == SQLITE_ROW) {
+                                const auto* type = sqlite3_column_text(poolLookup, 0);
+                                const auto* value = sqlite3_column_text(poolLookup, 1);
+                                if (type) targetName = reinterpret_cast<const char*>(type);
+                                if (value) {
+                                    if (!targetName.empty()) targetName += ": ";
+                                    targetName += reinterpret_cast<const char*>(value);
+                                }
+                            }
+                        }
+                    } else sqlite3_bind_null(stmt, 6);
+                    if (targetName.empty()) sqlite3_bind_null(stmt, 5);
+                    else sqlite3_bind_text(stmt, 5, targetName.c_str(), -1, SQLITE_TRANSIENT);
                     if (registerName.empty()) sqlite3_bind_null(stmt, 7);
                     else sqlite3_bind_text(stmt, 7, registerName.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_int(stmt, 8, target ? 100 : (indirect ? 20 : 50));
+                    sqlite3_bind_int(stmt, 8, target ? 100 : (poolRegisterMatch ? 40 : (indirect ? 20 : 50)));
                     if (indirect) hasPendingPool = false;
                     if (sqlite3_step(stmt) == SQLITE_DONE) edges++;
                     else errors++;
@@ -834,6 +853,7 @@ static void exportCallEdges(DartApp& app) {
     }
     g_db.exec("COMMIT");
     sqlite3_finalize(stmt);
+    sqlite3_finalize(poolLookup);
     fprintf(stderr, "fler-dart: exported %d call edges (errors=%d)\n", edges, errors);
 }
 
