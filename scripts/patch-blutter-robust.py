@@ -50,7 +50,32 @@ def analyzer_cpp(s):
                 "\n" + i + "} catch (const std::exception& e) {\n" +
                 i + "\tstd::cerr << \"fler-dart: skip function \" << std::hex << dartFn->Address()\n" +
                 i + "\t          << std::dec << \" (\" << e.what() << \")\\n\";\n" + i + "}")
-    return pat.sub(repl, s, count=1)
+    out = pat.sub(repl, s, count=1)
+    # Analyze code objects recovered into DartApp::nativeLib as well. These are
+    # common in obfuscated snapshots and are not part of app.libs.
+    native_marker = "fler-dart: analyze native synthetic functions"
+    if native_marker not in out:
+        end = out.find("\n}\n\n#endif // NO_CODE_ANALYSIS", out.find("void CodeAnalyzer::AnalyzeAll()"))
+        if end != -1:
+            native = '''
+\t// fler-dart: analyze native synthetic functions
+\tfor (auto cls : app.nativeLib.classes) {
+\t\tfor (auto dartFn : cls->Functions()) {
+\t\t\tif (dartFn->Size() == 0) continue;
+\t\t\ttry {
+\t\t\t\tauto asm_insns = disasmer.Disasm((uint8_t*)dartFn->MemAddress(), dartFn->Size(), dartFn->Address());
+\t\t\t\tif (asm_insns.Count() == 0) continue;
+\t\t\t\tdartFn->SetAnalyzedData(std::make_unique<AnalyzedFnData>(app, *dartFn, convertAsm(asm_insns)));
+\t\t\t\tasm2il(dartFn, asm_insns);
+\t\t\t} catch (const std::exception& e) {
+\t\t\t\tstd::cerr << "fler-dart: skip native function " << std::hex << dartFn->Address()
+\t\t\t\t          << std::dec << " (" << e.what() << ")\\n";
+\t\t\t}
+\t\t}
+\t}
+'''
+            out = out[:end] + native + out[end:]
+    return out
 
 
 def dartapp_h(s):
