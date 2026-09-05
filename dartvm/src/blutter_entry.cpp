@@ -273,7 +273,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
         put(key, std::to_string(n));
     };
 
-    put("engine_abi", "fler-dart-v0.5.20");
+    put("engine_abi", "fler-dart-v0.5.21");
 #ifdef DART_VERSION
     put("dart_version", DART_VERSION);
 #else
@@ -753,10 +753,18 @@ static void exportCallEdges(DartApp& app) {
             if (!cls) continue;
             for (auto* fn : cls->Functions()) {
                 if (!fn || !fn->GetAnalyzedData()) continue;
+                bool hasPendingPool = false;
+                uint64_t pendingPool = 0;
                 for (const auto& text : fn->GetAnalyzedData()->asmTexts.Data()) {
                     const std::string raw(text.text);
+                    if (text.dataType == AsmText::PoolOffset) {
+                        hasPendingPool = true;
+                        pendingPool = text.poolOffset;
+                    }
                     const bool direct = text.dataType == AsmText::Call;
-                    const bool indirect = raw.rfind("blr", 0) == 0;
+                    const bool indirectCall = raw.rfind("blr", 0) == 0;
+                    const bool indirectBranch = raw.rfind("br", 0) == 0 && !indirectCall;
+                    const bool indirect = indirectCall || indirectBranch;
                     if (!direct && !indirect) continue;
                     const uint64_t targetAddress = direct ? text.callAddress : 0;
                     auto* target = direct ? app.GetFunction(targetAddress) : nullptr;
@@ -772,13 +780,17 @@ static void exportCallEdges(DartApp& app) {
                     sqlite3_bind_int64(stmt, 2, (int64_t)text.addr);
                     if (direct) sqlite3_bind_int64(stmt, 3, (int64_t)targetAddress);
                     else sqlite3_bind_null(stmt, 3);
-                    sqlite3_bind_text(stmt, 4, indirect ? "INDIRECT_CALL" : "RESOLVED_CALL", -1, SQLITE_STATIC);
+                    sqlite3_bind_text(stmt, 4,
+                        indirectCall ? "INDIRECT_CALL" : (indirectBranch ? "INDIRECT_BRANCH" : "RESOLVED_CALL"),
+                        -1, SQLITE_STATIC);
                     if (targetName.empty()) sqlite3_bind_null(stmt, 5);
                     else sqlite3_bind_text(stmt, 5, targetName.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_null(stmt, 6);
+                    if (indirect && hasPendingPool) sqlite3_bind_int64(stmt, 6, (int64_t)pendingPool);
+                    else sqlite3_bind_null(stmt, 6);
                     if (registerName.empty()) sqlite3_bind_null(stmt, 7);
                     else sqlite3_bind_text(stmt, 7, registerName.c_str(), -1, SQLITE_TRANSIENT);
                     sqlite3_bind_int(stmt, 8, target ? 100 : (indirect ? 20 : 50));
+                    if (indirect) hasPendingPool = false;
                     if (sqlite3_step(stmt) == SQLITE_DONE) edges++;
                     else errors++;
                 }
