@@ -230,6 +230,34 @@ def no_cptr_array_tolerance(s):
     new = "\t\t\t// fler-dart: no_cptr may use a different effective payload offset;\n\t\t\t// ArrayOp classification is still valid, so do not abort the matcher."
     return s.replace(old, new, 1)
 
+def arm64_dart36_recovery(s):
+    # Dart 3.6 emits split CFGs around write barriers and pool loads. Optional
+    # recognizers must return nullptr on failed look-ahead, not throw.
+    def in_fn(text, name, edits):
+        pos=text.index(name); end=text.index("\n}",pos)
+        part=text[pos:end]
+        for old,new in edits: part=part.replace(old,new,1)
+        return text[:pos]+part+text[end:]
+
+    s=in_fn(s, "FunctionAnalyzer::ObjectPoolInstr FunctionAnalyzer::getObjectPoolInstruction", [
+        ("INSN_ASSERT(insn.ops(1).mem.base == offset_reg);", "if (insn.ops(1).mem.base != offset_reg) return ObjectPoolInstr{};"),
+        ("INSN_ASSERT(insn.ops(2).mem.base == offset_reg);", "if (insn.ops(2).mem.base != offset_reg) return ObjectPoolInstr{};"),
+        ("INSN_ASSERT(insn.ops(2).type == ARM64_OP_IMM);", "if (insn.ops(2).type != ARM64_OP_IMM) return ObjectPoolInstr{};"),
+    ])
+    s=in_fn(s, "FunctionAnalyzer::WriteBarrierInstr", []) if "FunctionAnalyzer::WriteBarrierInstr" in s else s
+    pos=s.index("FunctionAnalyzer::processWriteBarrierInstr")
+    end=s.index("\n}\n\nstatic ArrayOp",pos)
+    part=s[pos:end]
+    for old,new in [
+        ("INSN_ASSERT(insn.id() == ARM64_INS_AND);", "if (insn.id() != ARM64_INS_AND) return nullptr;"),
+        ("INSN_ASSERT(insn.id() == ARM64_INS_TST);", "if (insn.id() != ARM64_INS_TST) return nullptr;"),
+        ("INSN_ASSERT(insn.id() == ARM64_INS_B && insn.cc() == ARM64_CC_EQ);", "if (insn.id() != ARM64_INS_B || insn.cc() != ARM64_CC_EQ) return nullptr;"),
+        ("INSN_ASSERT(insn.id() == ARM64_INS_LDR);", "if (insn.id() != ARM64_INS_LDR) return nullptr;"),
+        ("INSN_ASSERT(insn.id() == ARM64_INS_BLR);", "if (insn.id() != ARM64_INS_BLR) return nullptr;"),
+    ]: part=part.replace(old,new,1)
+    s=s[:pos]+part+s[end:]
+    return s
+
 def dartapp_h(s):
     # Keep a per-analysis visited set and expose concrete per-function errors.
     if "#include <unordered_set>" not in s:
@@ -277,6 +305,7 @@ edit("DartLoader.cpp", dartloader_cpp)
 edit("CodeAnalyzer_arm64.cpp", arm64_analyzer_tolerance)
 edit("CodeAnalyzer_arm64.cpp", arm64_analyzer_recovery)
 edit("CodeAnalyzer_arm64.cpp", no_cptr_array_tolerance)
+edit("CodeAnalyzer_arm64.cpp", arm64_dart36_recovery)
 edit("CodeAnalyzer.h", codeanalyzer_h)
 edit("DartApp.h", dartapp_h)
 edit("DartApp.cpp", dartapp_cpp)
