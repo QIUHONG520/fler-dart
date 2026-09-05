@@ -273,7 +273,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
         put(key, std::to_string(n));
     };
 
-    put("engine_abi", "fler-dart-v0.5.28");
+    put("engine_abi", "fler-dart-v0.5.29");
 #ifdef DART_VERSION
     put("dart_version", DART_VERSION);
 #else
@@ -347,6 +347,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
     put("resolved_call_edges", std::to_string(edgeKindCount("RESOLVED_CALL")));
     put("indirect_call_edges", std::to_string(edgeKindCount("INDIRECT_CALL")));
     put("indirect_branch_edges", std::to_string(edgeKindCount("INDIRECT_BRANCH")));
+    put("unresolved_call_edges", std::to_string(edgeKindCount("INDIRECT_CALL") + edgeKindCount("INDIRECT_BRANCH")));
     sqlite3_finalize(st);
 }
 
