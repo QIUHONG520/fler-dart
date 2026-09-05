@@ -273,7 +273,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
         put(key, std::to_string(n));
     };
 
-    put("engine_abi", "fler-dart-v0.5.19");
+    put("engine_abi", "fler-dart-v0.5.20");
 #ifdef DART_VERSION
     put("dart_version", DART_VERSION);
 #else
@@ -743,8 +743,8 @@ static void exportCallEdges(DartApp& app) {
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(g_db.db,
             "INSERT OR IGNORE INTO call_edges "
-            "(caller_address,site_address,callee_address,kind,target_name,confidence) "
-            "VALUES (?,?,?,?,?,?)", -1, &stmt, nullptr) != SQLITE_OK) return;
+            "(caller_address,site_address,callee_address,kind,target_name,pool_offset,register_name,confidence) "
+            "VALUES (?,?,?,?,?,?,?,?)", -1, &stmt, nullptr) != SQLITE_OK) return;
     int edges = 0, errors = 0;
     g_db.exec("BEGIN TRANSACTION");
     for (auto* lib : exportLibraries(app)) {
@@ -754,17 +754,31 @@ static void exportCallEdges(DartApp& app) {
             for (auto* fn : cls->Functions()) {
                 if (!fn || !fn->GetAnalyzedData()) continue;
                 for (const auto& text : fn->GetAnalyzedData()->asmTexts.Data()) {
-                    if (text.dataType != AsmText::Call) continue;
-                    auto* target = app.GetFunction(text.callAddress);
+                    const std::string raw(text.text);
+                    const bool direct = text.dataType == AsmText::Call;
+                    const bool indirect = raw.rfind("blr", 0) == 0;
+                    if (!direct && !indirect) continue;
+                    const uint64_t targetAddress = direct ? text.callAddress : 0;
+                    auto* target = direct ? app.GetFunction(targetAddress) : nullptr;
                     const std::string targetName = target ? target->FullName() : std::string();
+                    std::string registerName;
+                    if (indirect) {
+                        const auto space = raw.find(' ');
+                        if (space != std::string::npos) registerName = raw.substr(space + 1);
+                    }
                     sqlite3_reset(stmt);
                     sqlite3_clear_bindings(stmt);
                     sqlite3_bind_int64(stmt, 1, (int64_t)fn->Address());
                     sqlite3_bind_int64(stmt, 2, (int64_t)text.addr);
-                    sqlite3_bind_int64(stmt, 3, (int64_t)text.callAddress);
-                    sqlite3_bind_text(stmt, 4, "RESOLVED_CALL", -1, SQLITE_STATIC);
-                    sqlite3_bind_text(stmt, 5, targetName.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_int(stmt, 6, target ? 100 : 50);
+                    if (direct) sqlite3_bind_int64(stmt, 3, (int64_t)targetAddress);
+                    else sqlite3_bind_null(stmt, 3);
+                    sqlite3_bind_text(stmt, 4, indirect ? "INDIRECT_CALL" : "RESOLVED_CALL", -1, SQLITE_STATIC);
+                    if (targetName.empty()) sqlite3_bind_null(stmt, 5);
+                    else sqlite3_bind_text(stmt, 5, targetName.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_null(stmt, 6);
+                    if (registerName.empty()) sqlite3_bind_null(stmt, 7);
+                    else sqlite3_bind_text(stmt, 7, registerName.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_int(stmt, 8, target ? 100 : (indirect ? 20 : 50));
                     if (sqlite3_step(stmt) == SQLITE_DONE) edges++;
                     else errors++;
                 }
