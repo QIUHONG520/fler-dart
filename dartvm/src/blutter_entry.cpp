@@ -273,7 +273,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
         put(key, std::to_string(n));
     };
 
-    put("engine_abi", "fler-dart-v0.5.21");
+    put("engine_abi", "fler-dart-v0.5.22");
 #ifdef DART_VERSION
     put("dart_version", DART_VERSION);
 #else
@@ -755,12 +755,16 @@ static void exportCallEdges(DartApp& app) {
                 if (!fn || !fn->GetAnalyzedData()) continue;
                 bool hasPendingPool = false;
                 uint64_t pendingPool = 0;
+                unsigned pendingPoolAge = 0;
                 for (const auto& text : fn->GetAnalyzedData()->asmTexts.Data()) {
                     const std::string raw(text.text);
+                    if (hasPendingPool && pendingPoolAge < 0xffffffffu) pendingPoolAge++;
                     if (text.dataType == AsmText::PoolOffset) {
                         hasPendingPool = true;
                         pendingPool = text.poolOffset;
+                        pendingPoolAge = 0;
                     }
+                    if (hasPendingPool && pendingPoolAge > 4) hasPendingPool = false;
                     const bool direct = text.dataType == AsmText::Call;
                     const bool indirectCall = raw.rfind("blr", 0) == 0;
                     const bool indirectBranch = raw.rfind("br", 0) == 0 && !indirectCall;
@@ -785,7 +789,8 @@ static void exportCallEdges(DartApp& app) {
                         -1, SQLITE_STATIC);
                     if (targetName.empty()) sqlite3_bind_null(stmt, 5);
                     else sqlite3_bind_text(stmt, 5, targetName.c_str(), -1, SQLITE_TRANSIENT);
-                    if (indirect && hasPendingPool) sqlite3_bind_int64(stmt, 6, (int64_t)pendingPool);
+                    if (indirect && hasPendingPool && pendingPoolAge <= 4)
+                        sqlite3_bind_int64(stmt, 6, (int64_t)pendingPool);
                     else sqlite3_bind_null(stmt, 6);
                     if (registerName.empty()) sqlite3_bind_null(stmt, 7);
                     else sqlite3_bind_text(stmt, 7, registerName.c_str(), -1, SQLITE_TRANSIENT);
