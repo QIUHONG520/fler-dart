@@ -72,6 +72,9 @@ struct Db {
             fprintf(stderr, "SQLite open failed: %s\n", sqlite3_errmsg(db));
             return false;
         }
+        sqlite3_busy_timeout(db, 5000);
+        exec("PRAGMA temp_store=MEMORY");
+        exec("PRAGMA synchronous=NORMAL");
         return true;
     }
 
@@ -243,7 +246,7 @@ static void writeAnalysisMeta(bool noCodeAnalysis) {
         put(key, std::to_string(n));
     };
 
-    put("engine_abi", "fler-dart-v0.5.11");
+    put("engine_abi", "fler-dart-v0.5.12");
 #ifdef DART_VERSION
     put("dart_version", DART_VERSION);
 #else
@@ -474,51 +477,52 @@ static void extractEnumMap(const std::string& dump, const std::string& clsName,
 // 导出 classes + methods（直接遍历 DartApp 内存结构）
 static void exportClassesAndMethods(DartApp& app, DartDumper& dumper) {
     const auto libs = exportLibraries(app);
-    int classes = 0, methods = 0;
-    g_db.exec("BEGIN TRANSACTION");
+    int classes = 0, methods = 0, classErrors = 0, methodErrors = 0;
+    sqlite3_stmt* classStmt = nullptr;
+    sqlite3_stmt* methodStmt = nullptr;
+    const char* classSql =
+        "INSERT OR IGNORE INTO classes (id, name, super_cls, fields) VALUES (?,?,?,?)";
+    const char* methodSql =
+        "INSERT OR IGNORE INTO methods (class_id, name, address, size, src_code) VALUES (?,?,?,?,?)";
+    if (sqlite3_prepare_v2(g_db.db, classSql, -1, &classStmt, nullptr) != SQLITE_OK ||
+        sqlite3_prepare_v2(g_db.db, methodSql, -1, &methodStmt, nullptr) != SQLITE_OK) {
+        fprintf(stderr, "fler-dart: prepare classes/methods statements failed\n");
+        sqlite3_finalize(classStmt);
+        sqlite3_finalize(methodStmt);
+        return;
+    }
 
+    g_db.exec("BEGIN TRANSACTION");
     for (auto* lib : libs) {
         if (!lib) continue;
         for (auto* cls : lib->classes) {
             if (!cls) continue;
-
-            // classes (id, name, super_cls, fields)
-            {
-                // NO_CODE_ANALYSIS 是崩溃兜底路径：避免字段类型 ToString()/父类遍历等
-                // 深层对象访问，只导出稳定的结构标识。标准引擎保留完整字段信息。
-                std::string fields;
+            std::string fields;
 #ifndef NO_CODE_ANALYSIS
-                for (auto* f : cls->Fields()) {
-                    if (!f) continue;
-                    if (!fields.empty()) fields += ", ";
-                    char offbuf[24];
-                    snprintf(offbuf, sizeof(offbuf), "0x%x", f->Offset());
-                    std::string typeName = "?";
-                    if (f->Type()) typeName = f->Type()->ToString();
-                    fields += f->Name() + "@" + offbuf + ":" + typeName;
-                }
-#endif
-                sqlite3_stmt* st = nullptr;
-                if (sqlite3_prepare_v2(g_db.db,
-                    "INSERT OR IGNORE INTO classes (id, name, super_cls, fields) VALUES (?,?,?,?)",
-                    -1, &st, nullptr) == SQLITE_OK) {
-                    sqlite3_bind_int64(st, 1, (int64_t)cls->Id());
-                    sqlite3_bind_text(st, 2, cls->Name().c_str(), -1, SQLITE_TRANSIENT);
-                    const std::string super =
-#ifndef NO_CODE_ANALYSIS
-                        cls->Parent() ? cls->Parent()->Name() : std::string();
-#else
-                        std::string();
-#endif
-                    sqlite3_bind_text(st, 3, super.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(st, 4, fields.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_step(st);
-                }
-                sqlite3_finalize(st);
-                classes++;
+            for (auto* f : cls->Fields()) {
+                if (!f) continue;
+                if (!fields.empty()) fields += ", ";
+                char offbuf[24];
+                snprintf(offbuf, sizeof(offbuf), "0x%x", f->Offset());
+                std::string typeName = "?";
+                if (f->Type()) typeName = f->Type()->ToString();
+                fields += f->Name() + "@" + offbuf + ":" + typeName;
             }
+#endif
+            sqlite3_reset(classStmt);
+            sqlite3_clear_bindings(classStmt);
+            sqlite3_bind_int64(classStmt, 1, (int64_t)cls->Id());
+            sqlite3_bind_text(classStmt, 2, cls->Name().c_str(), -1, SQLITE_TRANSIENT);
+#ifndef NO_CODE_ANALYSIS
+            const std::string super = cls->Parent() ? cls->Parent()->Name() : std::string();
+#else
+            const std::string super;
+#endif
+            sqlite3_bind_text(classStmt, 3, super.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(classStmt, 4, fields.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(classStmt) == SQLITE_DONE) classes++;
+            else classErrors++;
 
-            // methods (class_id, name, address, size, src_code)
             for (auto* fn : cls->Functions()) {
                 if (!fn) continue;
                 const std::string asmText =
@@ -528,25 +532,23 @@ static void exportClassesAndMethods(DartApp& app, DartDumper& dumper) {
                     fn->Name();
 #endif
                 const std::string mname = buildFunctionName(fn, cls);
-                sqlite3_stmt* st = nullptr;
-                if (sqlite3_prepare_v2(g_db.db,
-                    "INSERT OR IGNORE INTO methods (class_id, name, address, size, src_code) VALUES (?,?,?,?,?)",
-                    -1, &st, nullptr) == SQLITE_OK) {
-                    sqlite3_bind_int64(st, 1, (int64_t)cls->Id());
-                    sqlite3_bind_text(st, 2, mname.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_int64(st, 3, (int64_t)fn->Address());
-                    sqlite3_bind_int64(st, 4, (int64_t)fn->Size());
-                    sqlite3_bind_text(st, 5, asmText.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_step(st);
-                }
-                sqlite3_finalize(st);
-                methods++;
+                sqlite3_reset(methodStmt);
+                sqlite3_clear_bindings(methodStmt);
+                sqlite3_bind_int64(methodStmt, 1, (int64_t)cls->Id());
+                sqlite3_bind_text(methodStmt, 2, mname.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int64(methodStmt, 3, (int64_t)fn->Address());
+                sqlite3_bind_int64(methodStmt, 4, (int64_t)fn->Size());
+                sqlite3_bind_text(methodStmt, 5, asmText.c_str(), -1, SQLITE_TRANSIENT);
+                if (sqlite3_step(methodStmt) == SQLITE_DONE) methods++;
+                else methodErrors++;
             }
         }
     }
-
     g_db.exec("COMMIT");
-    fprintf(stderr, "fler-dart: exported %d classes, %d methods\n", classes, methods);
+    sqlite3_finalize(classStmt);
+    sqlite3_finalize(methodStmt);
+    fprintf(stderr, "fler-dart: exported %d classes, %d methods (db errors: %d/%d)\n",
+            classes, methods, classErrors, methodErrors);
 }
 
 // 导出 asm_blocks（标准 DumpCode 格式的完整反汇编存档，独立于 methods.src_code）。
