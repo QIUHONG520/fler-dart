@@ -421,12 +421,41 @@ def dartapp_class_table_diagnostics(s):
     new = '''\t// load from class table
 \tfprintf(stderr, "fler-dart: class-table top-loop-done\\n"); fflush(stderr);
 \tfor (intptr_t i = 0; i < num_cids; i++) {
-\t\tif (i < 4 || (i % 1000) == 0) { fprintf(stderr, "fler-dart: class-table cid i=%ld\\n", (long)i); fflush(stderr); }
+\t\tif (i < 4 || i >= 6000 || (i % 1000) == 0) { fprintf(stderr, "fler-dart: class-table cid-begin i=%ld\\n", (long)i); fflush(stderr); }
 \t\tauto clsPtr = table->At(i);'''
-    return s.replace(old, new, 1)
+    s = s.replace(old, new, 1)
+    old = '''#endif
+\t}
 
+\t// post process of classes
+\t// map super class and native type class ids'''
+    new = '''#endif
+\t\tif (i >= 6000) { fprintf(stderr, "fler-dart: class-table cid-done i=%ld class=%p\\n", (long)i, (void*)classes[i]); fflush(stderr); }
+\t}
 
-edit("DartApp.cpp", dartapp_cpp)
+\tfprintf(stderr, "fler-dart: class-table cid-loop-done\\n"); fflush(stderr);
+\t// post process of classes
+\t// map super class and native type class ids'''
+    s = s.replace(old, new, 1)
+    old = '''\ttypeDb = std::unique_ptr<DartTypeDb>(new DartTypeDb(classes));
+
+\t// complete the class info after super class is set'''
+    new = '''\tfprintf(stderr, "fler-dart: class-table parent-map-done\\n"); fflush(stderr);
+\ttypeDb = std::unique_ptr<DartTypeDb>(new DartTypeDb(classes));
+\tfprintf(stderr, "fler-dart: class-table typedb-done\\n"); fflush(stderr);
+
+\t// complete the class info after super class is set'''
+    s = s.replace(old, new, 1)
+    old = '''\tfor (auto dartCls : classes) {
+\t\tif (dartCls == nullptr || dartCls->superCls == nullptr)'''
+    new = '''\tintptr_t fler_post_index = 0;
+\tfor (auto dartCls : classes) {
+\t\tif (fler_post_index >= 6000) { fprintf(stderr, "fler-dart: class-table post-begin i=%ld class=%p\\n", (long)fler_post_index, (void*)dartCls); fflush(stderr); }
+\t\t++fler_post_index;
+\t\tif (dartCls == nullptr || dartCls->superCls == nullptr)'''
+    s = s.replace(old, new, 1)
+    return s
+
 edit("DartApp.cpp", dartapp_destructor)
 edit("DartApp.cpp", dartapp_class_table_diagnostics)
 edit("CodeAnalyzer_arm64.cpp", arm64)
