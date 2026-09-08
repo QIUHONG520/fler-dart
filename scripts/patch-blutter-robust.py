@@ -381,6 +381,46 @@ edit("CodeAnalyzer_arm64.cpp", no_cptr_array_tolerance)
 edit("CodeAnalyzer_arm64.cpp", arm64_dart36_recovery)
 edit("CodeAnalyzer.h", codeanalyzer_h)
 edit("DartApp.h", dartapp_h)
+def dartclass_super_guard(s):
+    # SuperClass() may be Dart null for VM/internal classes. The upstream code
+    # dereferences it before checking for null, which makes class recovery
+    # randomly fault depending on the mapped null-object address.
+    old = '''\t\tauto supClsPtr = cls.SuperClass();
+\t\t
+\t\tauto superCid = supClsPtr.untag()->id();
+\t\tif (superCid > 0 && (intptr_t)supClsPtr == (intptr_t)dart::Object::null())
+\t\t\tsuperCid = 0;
+\t\tif (superCid)
+\t\t\tsuperCls = (DartClass*)(intptr_t)superCid; // temporary save class id as pointer. it will be set correctly after all classes are loaded'''
+    new = '''\t\tauto supClsPtr = cls.SuperClass();
+
+\t\t// fler-dart: never dereference the Dart null object as a Class.
+\t\tintptr_t superCid = 0;
+\t\tif ((intptr_t)supClsPtr != (intptr_t)dart::Object::null())
+\t\t\tsuperCid = supClsPtr.untag()->id();
+\t\tif (superCid > 0)
+\t\t\tsuperCls = (DartClass*)superCid; // temporary class id; resolved after all classes are loaded'''
+    return s.replace(old, new, 1)
+
+
+def dartapp_parent_bounds(s):
+    # Corrupt/unknown superclass CIDs must not index beyond the recovered class
+    # vector. Preserve the class and mark its parent unknown instead.
+    old = '''\t\tif (dartCls->superCls)
+\t\t\tdartCls->superCls = classes[(intptr_t)dartCls->superCls];'''
+    new = '''\t\tif (dartCls->superCls) {
+\t\t\tconst auto super_cid = (intptr_t)dartCls->superCls;
+\t\t\tif (super_cid > 0 && static_cast<size_t>(super_cid) < classes.size())
+\t\t\t\tdartCls->superCls = classes[super_cid];
+\t\t\telse {
+\t\t\t\tstd::cerr << "fler-dart: ignore invalid superclass cid=" << super_cid
+\t\t\t\t          << " class=" << dartCls->id << "\\n";
+\t\t\t\tdartCls->superCls = nullptr;
+\t\t\t}
+\t\t}'''
+    return s.replace(old, new, 1)
+
+
 def dartapp_class_table_diagnostics(s):
     # Keep 2.14 no_cptr layout failures actionable: the class-table walk is
     # before CodeAnalyzer's signal guard, so a bad VM/header assumption otherwise
@@ -456,8 +496,11 @@ def dartapp_class_table_diagnostics(s):
     s = s.replace(old, new, 1)
     return s
 
+edit("DartApp.cpp", dartapp_cpp)
 edit("DartApp.cpp", dartapp_destructor)
+edit("DartApp.cpp", dartapp_parent_bounds)
 edit("DartApp.cpp", dartapp_class_table_diagnostics)
+edit("DartClass.cpp", dartclass_super_guard)
 edit("CodeAnalyzer_arm64.cpp", arm64)
 edit("CodeAnalyzer.cpp", analyzer_cpp)
 edit("CodeAnalyzer.cpp", function_size_guard)
