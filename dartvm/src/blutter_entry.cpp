@@ -1096,7 +1096,16 @@ int blutter_analyze(const char* so_path, const char* db_path, const char* out_di
     try {
         fprintf(stderr, "fler-dart: stage=create-app\n");
         fflush(stderr);
-        DartApp app{ so_path };
+        // DartApp::~DartApp() eventually triggers DartLoader::Unload().  Old
+        // Dart 2.14 snapshots can fault there *after* every SQLite transaction
+        // has been committed (database-closed in the worker log).  The Android
+        // caller runs this entry point in a disposable analysis-worker process,
+        // therefore intentionally retain the snapshot owner until process exit
+        // rather than invoking its unsafe teardown path.  This is distinct from
+        // the isolate hand-off at the next invocation, handled by
+        // detachLeftoverIsolate().
+        auto* appOwner = new DartApp{ so_path };
+        DartApp& app = *appOwner;
         fprintf(stderr, "fler-dart: stage=load-info\n");
         fflush(stderr);
         app.EnterScope(); app.LoadInfo(); app.ExitScope();

@@ -298,7 +298,52 @@ def dartapp_cpp(s):
            "\t\t\tstd::cerr << \"fler-dart: skip unknown object pool entry type=\"\n"
            "\t\t\t          << static_cast<int>(objType) << \" index=\" << i << \"\\n\";\n"
            "\t\t\tcontinue;\n\t\t}")
-    return s.replace(old, new, 1)
+    s = s.replace(old, new, 1)
+    # Emit fine-grained no_cptr diagnostics. A crash reported only as
+    # stage=load-info is otherwise indistinguishable between class-table,
+    # stub, heap, object-pool, and finalization layout failures.
+    if "fler-dart: stage=load-class-table" not in s:
+        old = """\tloadFromClassTable(ig);
+
+\tauto store = ig->object_store();
+
+\t// load pre-defined stub
+\tloadStubs(store);
+
+\t// getting hidden functions from InstructionsTable are not compatible against old Dart version
+\t// find all Code object in heap is a work around for getting all functions
+\tfindFunctionInHeap();
+
+\tloadFromObjectPool();
+
+\tfinalizeFunctionsInfo();"""
+        new = """\tfprintf(stderr, \"fler-dart: stage=load-class-table\\n\"); fflush(stderr);
+\tloadFromClassTable(ig);
+\tfprintf(stderr, \"fler-dart: stage=load-class-table-done\\n\"); fflush(stderr);
+
+\tauto store = ig->object_store();
+
+\tfprintf(stderr, \"fler-dart: stage=load-stubs\\n\"); fflush(stderr);
+\t// load pre-defined stub
+\tloadStubs(store);
+\tfprintf(stderr, \"fler-dart: stage=load-stubs-done\\n\"); fflush(stderr);
+
+\tfprintf(stderr, \"fler-dart: stage=find-functions-heap\\n\"); fflush(stderr);
+\t// getting hidden functions from InstructionsTable are not compatible against old Dart version
+\t// find all Code object in heap is a work around for getting all functions
+\tfindFunctionInHeap();
+\tfprintf(stderr, \"fler-dart: stage=find-functions-heap-done\\n\"); fflush(stderr);
+
+\tfprintf(stderr, \"fler-dart: stage=load-object-pool\\n\"); fflush(stderr);
+\tloadFromObjectPool();
+\tfprintf(stderr, \"fler-dart: stage=load-object-pool-done\\n\"); fflush(stderr);
+
+\tfprintf(stderr, \"fler-dart: stage=finalize-functions\\n\"); fflush(stderr);
+\tfinalizeFunctionsInfo();
+\tfprintf(stderr, \"fler-dart: stage=finalize-functions-done\\n\"); fflush(stderr);"""
+        if old in s:
+            s = s.replace(old, new, 1)
+    return s
 
 
 edit("DartLoader.cpp", dartloader_cpp)
