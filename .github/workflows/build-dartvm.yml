@@ -385,6 +385,16 @@ jobs:
           name: fler-engines-release
           path: release-assets
 
+      - name: Preserve previous dist snapshot for targeted manual build
+        if: github.event_name == 'workflow_dispatch' && inputs.dart-versions != ''
+        run: |
+          # A targeted engine rebuild is an overlay, not a complete release.
+          # Keep all engine versions that are not part of this invocation.
+          mkdir -p /tmp/fler-previous-dist
+          git fetch origin dist --depth=1
+          git archive origin/dist dist | tar -x -C /tmp/fler-previous-dist
+          echo "Preserved engines: $(find /tmp/fler-previous-dist/dist/engines -name 'dartvm-*.7z' 2>/dev/null | wc -l)"
+
       # ── 归档到独立 dist 分支（孤儿分支：每次重建快照，历史只有最新产物，仓库不膨胀）──
       - name: Switch to orphan dist branch
         run: |
@@ -395,9 +405,21 @@ jobs:
         run: |
           rm -rf dist
           mkdir -p dist/engines dist/runtime
+          # Targeted workflow_dispatch keeps the previous complete catalog and
+          # replaces only archives produced by this run. Full/tag builds start
+          # from an empty snapshot as before.
+          if [ -d /tmp/fler-previous-dist/dist ]; then
+            cp -a /tmp/fler-previous-dist/dist/. dist/
+          fi
           cp release-assets/dartvm-*.7z dist/engines/ 2>/dev/null || true
           cp release-assets/fler-runtime-libs.7z dist/runtime/ 2>/dev/null || true
-          cp release-assets/checksums.txt dist/ 2>/dev/null || true
+          (
+            cd dist
+            find engines -maxdepth 1 -name 'dartvm-*.7z' -type f | sort | while read -r f; do
+              printf '%s  %s\n' "$(sha256sum "$f" | awk '{print $1}')" "$(basename "$f")"
+            done
+            printf '%s  %s\n' "$(sha256sum runtime/fler-runtime-libs.7z | awk '{print $1}')" "fler-runtime-libs.7z"
+          ) > dist/checksums.txt
           echo "=== dist/ ==="
           find dist -type f | sort
           echo "引擎包数量: $(ls dist/engines/*.7z 2>/dev/null | wc -l)"
@@ -480,11 +502,17 @@ jobs:
 
           ENGINES_JSON=""
           DART_LIST=""
-          for f in dartvm-*.7z; do
-            [ -f "$f" ] || continue
+          ENGINE_DIR="."
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && \
+             [ -n "${{ inputs.dart-versions }}" ] && [ -d ../dist/engines ]; then
+            ENGINE_DIR="../dist/engines"
+          fi
+          for engine_path in "$ENGINE_DIR"/dartvm-*.7z; do
+            [ -f "$engine_path" ] || continue
+            f=$(basename "$engine_path")
             ver=$(echo "$f" | sed -E 's/^dartvm-([0-9.]+)\.7z$/\1/')
-            sha=$(sha256sum "$f" | awk '{print $1}')
-            size=$(wc -c < "$f")
+            sha=$(sha256sum "$engine_path" | awk '{print $1}')
+            size=$(wc -c < "$engine_path")
             [ -n "$ENGINES_JSON" ] && ENGINES_JSON="$ENGINES_JSON,"
             ENGINES_JSON="$ENGINES_JSON { \"dartVersion\": \"$ver\", \"file\": \"$f\", \"url\": \"$BASE/$ENG_PATH$f\", \"sha256\": \"$sha\", \"sizeBytes\": $size }"
             DART_LIST="$DART_LIST \"$ver\","
