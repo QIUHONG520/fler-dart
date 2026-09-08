@@ -421,85 +421,9 @@ def dartapp_parent_bounds(s):
     return s.replace(old, new, 1)
 
 
-def dartapp_class_table_diagnostics(s):
-    # Keep 2.14 no_cptr layout failures actionable: the class-table walk is
-    # before CodeAnalyzer's signal guard, so a bad VM/header assumption otherwise
-    # only appears as a bare SIGSEGV.
-    marker = "fler-dart: class-table diagnostics v1"
-    if marker in s:
-        return s
-    old = '''void DartApp::loadFromClassTable(dart::IsolateGroup* ig)
-{
-\tauto table = ig->class_table();
-\tconst auto num_cids = table->NumCids();
-\tconst auto num_top_cids = table->NumTopLevelCids();'''
-    new = '''void DartApp::loadFromClassTable(dart::IsolateGroup* ig)
-{
-\tfprintf(stderr, "fler-dart: class-table diagnostics v1\\n"); fflush(stderr);
-\tauto table = ig->class_table();
-\tfprintf(stderr, "fler-dart: class-table pointer=%p\\n", (void*)table); fflush(stderr);
-\tconst auto num_cids = table->NumCids();
-\tfprintf(stderr, "fler-dart: class-table num-cids=%ld\\n", (long)num_cids); fflush(stderr);
-\tconst auto num_top_cids = table->NumTopLevelCids();
-\tfprintf(stderr, "fler-dart: class-table num-top-cids=%ld\\n", (long)num_top_cids); fflush(stderr);'''
-    if old not in s:
-        return s
-    s = s.replace(old, new, 1)
-    old = '''\tfor (intptr_t i = 0; i < num_top_cids; i++) {
-\t\tconst auto topCid = dart::ClassTable::CidFromTopLevelIndex(i);
-\t\tauto clsPtr = table->At(topCid);
-\t\tif (clsPtr == nullptr)'''
-    new = '''\tfor (intptr_t i = 0; i < num_top_cids; i++) {
-\t\tif (i < 4 || (i % 1000) == 0) { fprintf(stderr, "fler-dart: class-table top i=%ld\\n", (long)i); fflush(stderr); }
-\t\tconst auto topCid = dart::ClassTable::CidFromTopLevelIndex(i);
-\t\tauto clsPtr = table->At(topCid);
-\t\tif (clsPtr == nullptr)'''
-    s = s.replace(old, new, 1)
-    old = '''\t// load from class table
-\tfor (intptr_t i = 0; i < num_cids; i++) {
-\t\tauto clsPtr = table->At(i);'''
-    new = '''\t// load from class table
-\tfprintf(stderr, "fler-dart: class-table top-loop-done\\n"); fflush(stderr);
-\tfor (intptr_t i = 0; i < num_cids; i++) {
-\t\tif (i < 4 || i >= 6000 || (i % 1000) == 0) { fprintf(stderr, "fler-dart: class-table cid-begin i=%ld\\n", (long)i); fflush(stderr); }
-\t\tauto clsPtr = table->At(i);'''
-    s = s.replace(old, new, 1)
-    old = '''#endif
-\t}
-
-\t// post process of classes
-\t// map super class and native type class ids'''
-    new = '''#endif
-\t\tif (i >= 6000) { fprintf(stderr, "fler-dart: class-table cid-done i=%ld class=%p\\n", (long)i, (void*)classes[i]); fflush(stderr); }
-\t}
-
-\tfprintf(stderr, "fler-dart: class-table cid-loop-done\\n"); fflush(stderr);
-\t// post process of classes
-\t// map super class and native type class ids'''
-    s = s.replace(old, new, 1)
-    old = '''\ttypeDb = std::unique_ptr<DartTypeDb>(new DartTypeDb(classes));
-
-\t// complete the class info after super class is set'''
-    new = '''\tfprintf(stderr, "fler-dart: class-table parent-map-done\\n"); fflush(stderr);
-\ttypeDb = std::unique_ptr<DartTypeDb>(new DartTypeDb(classes));
-\tfprintf(stderr, "fler-dart: class-table typedb-done\\n"); fflush(stderr);
-
-\t// complete the class info after super class is set'''
-    s = s.replace(old, new, 1)
-    old = '''\tfor (auto dartCls : classes) {
-\t\tif (dartCls == nullptr || dartCls->superCls == nullptr)'''
-    new = '''\tintptr_t fler_post_index = 0;
-\tfor (auto dartCls : classes) {
-\t\tif (fler_post_index >= 6000) { fprintf(stderr, "fler-dart: class-table post-begin i=%ld class=%p\\n", (long)fler_post_index, (void*)dartCls); fflush(stderr); }
-\t\t++fler_post_index;
-\t\tif (dartCls == nullptr || dartCls->superCls == nullptr)'''
-    s = s.replace(old, new, 1)
-    return s
-
 edit("DartApp.cpp", dartapp_cpp)
 edit("DartApp.cpp", dartapp_destructor)
 edit("DartApp.cpp", dartapp_parent_bounds)
-edit("DartApp.cpp", dartapp_class_table_diagnostics)
 edit("DartClass.cpp", dartclass_super_guard)
 edit("CodeAnalyzer_arm64.cpp", arm64)
 edit("CodeAnalyzer.cpp", analyzer_cpp)
