@@ -98,6 +98,34 @@ def function_size_guard(s):
         "if (dartFn->Size() <= 0 || dartFn->Size() > 0x1000000)")
 
 
+def dartapp_destructor(s):
+    # The analysis worker is disposable. Do not destroy snapshot-backed Dart
+    # objects after SQLite has been committed: Dart 2.14 can fault while
+    # tearing down handles/libraries even though the analysis succeeded.
+    old = '''DartApp::~DartApp()
+{
+\tExitScope();
+\tDartLoader::Unload();
+
+\tfor (auto lib : libs) {
+\t\tdelete lib;
+\t}
+\t// classes are just reference. owners are in libraries. DO NOT delete here
+
+\tfor (auto& stub : stubs) {
+\t\tdelete stub.second;
+\t}
+}'''
+    new = '''DartApp::~DartApp()
+{
+\t// fler-dart: intentionally leak this process-local analysis state. The
+\t// Android worker exits immediately after blutter_analyze returns, and Dart
+\t// 2.14/3.6 snapshot teardown is not safe after export. This also keeps the
+\t// normal stack lifetime during LoadInfo, avoiding allocator/lifetime changes.
+}'''
+    return s.replace(old, new, 1)
+
+
 def dartloader_cpp(s):
     # The Android worker is short-lived. Dart_Cleanup is process-global and
     # crashes with some snapshot revisions after successful export; the worker
@@ -354,6 +382,7 @@ edit("CodeAnalyzer_arm64.cpp", arm64_dart36_recovery)
 edit("CodeAnalyzer.h", codeanalyzer_h)
 edit("DartApp.h", dartapp_h)
 edit("DartApp.cpp", dartapp_cpp)
+edit("DartApp.cpp", dartapp_destructor)
 edit("CodeAnalyzer_arm64.cpp", arm64)
 edit("CodeAnalyzer.cpp", analyzer_cpp)
 edit("CodeAnalyzer.cpp", function_size_guard)
