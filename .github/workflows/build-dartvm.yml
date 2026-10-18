@@ -27,7 +27,11 @@ env:
   # manifest.json 由打包阶段按实际构建产物自动枚举生成，发版新增/调整版本时只改 DART_VERSIONS。
   RELEASE_NOTES: 'v0.5.0：官方全版本（2.14~3.13）——自动拉取 dart-archive stable 列表，构建 2.14.0 至 3.13.1 共 105 个版本，后续新版本发布自动纳入，失败版本自动统计到 dist/failed-versions.txt 并在下次构建排除。'
 
-concurrency:`r`n  group: fler-dartvm-${{ github.ref }}`r`n  cancel-in-progress: false`r`n`r`njobs:
+concurrency:
+  group: fler-dartvm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
   # ══════════════════════════════════════════════════════════
   # STAGE 0: Resolve target versions (push/tag = all; manual = comma list)
   # ══════════════════════════════════════════════════════════
