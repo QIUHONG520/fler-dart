@@ -558,6 +558,23 @@ jobs:
           echo "=== manifest.json ==="
           cat ../manifest.json
 
+      - name: Validate generated manifest
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, sys
+          p = pathlib.Path('manifest.json')
+          if not p.is_file():
+              sys.exit('manifest.json missing')
+          data = json.loads(p.read_text(encoding='utf-8'))
+          engines = data.get('engines') or []
+          if not engines:
+              sys.exit('manifest has no engines')
+          bad = [e.get('dartVersion') for e in engines
+                 if not e.get('sha256') or not e.get('downloadUrl')]
+          if bad:
+              sys.exit('manifest entries missing sha256/downloadUrl: %s' % bad[:5])
+          print('manifest valid:', len(engines), 'engines')
+          PY
       - name: Commit manifest.json + version.json to main
         uses: actions/github-script@v7
         with:
