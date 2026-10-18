@@ -27,13 +27,14 @@ env:
   # manifest.json 由打包阶段按实际构建产物自动枚举生成，发版新增/调整版本时只改 DART_VERSIONS。
   RELEASE_NOTES: 'v0.5.0：官方全版本（2.14~3.13）——自动拉取 dart-archive stable 列表，构建 2.14.0 至 3.13.1 共 105 个版本，后续新版本发布自动纳入，失败版本自动统计到 dist/failed-versions.txt 并在下次构建排除。'
 
-jobs:
+concurrency:`r`n  group: fler-dartvm-${{ github.ref }}`r`n  cancel-in-progress: false`r`n`r`njobs:
   # ══════════════════════════════════════════════════════════
   # STAGE 0: Resolve target versions (push/tag = all; manual = comma list)
   # ══════════════════════════════════════════════════════════
   resolve-versions:
     name: Resolve Dart versions (official ∩ supported)
     runs-on: ubuntu-latest
+    timeout-minutes: 240
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
@@ -109,6 +110,7 @@ jobs:
   shared-libs:
     name: Build Shared Libraries (capstone.a + ICU + c++_shared)
     runs-on: ubuntu-latest
+    timeout-minutes: 240
     steps:
       - name: Checkout fler-dart
         uses: actions/checkout@v4
@@ -176,6 +178,7 @@ jobs:
     name: Build Engine ${{ matrix.dart-version }}
     needs: [resolve-versions, shared-libs]
     runs-on: ubuntu-latest
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       # 动态 matrix：由 resolve-versions 输出（手动输入逗号列表，或默认全量 DART_VERSIONS）
@@ -258,6 +261,7 @@ jobs:
     needs: [shared-libs, build-engines]
     if: always() && needs.shared-libs.result == 'success' && (needs.build-engines.result == 'success' || needs.build-engines.result == 'failure')
     runs-on: ubuntu-latest
+    timeout-minutes: 240
 
     steps:
       - name: Download shared libs
@@ -370,6 +374,7 @@ jobs:
     needs: [shared-libs, build-engines, package-release]
     if: always() && needs.shared-libs.result == 'success' && (needs.build-engines.result == 'success' || needs.build-engines.result == 'failure') && needs.package-release.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 240
     permissions:
       contents: write
     steps:
@@ -577,6 +582,7 @@ jobs:
     needs: [shared-libs, build-engines, package-release]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 240
     permissions:
       contents: write
 
