@@ -185,6 +185,7 @@ jobs:
     timeout-minutes: 240
     strategy:
       fail-fast: false
+      max-parallel: 8
       # 动态 matrix：由 resolve-versions 输出（手动输入逗号列表，或默认全量 DART_VERSIONS）
       matrix: ${{ fromJSON(needs.resolve-versions.outputs.matrix) }}
 
