@@ -570,9 +570,9 @@ jobs:
           if not engines:
               sys.exit('manifest has no engines')
           bad = [e.get('dartVersion') for e in engines
-                 if not e.get('sha256') or not e.get('downloadUrl')]
+                 if not e.get('sha256') or not (e.get('url') or e.get('downloadUrl'))]
           if bad:
-              sys.exit('manifest entries missing sha256/downloadUrl: %s' % bad[:5])
+              sys.exit('manifest entries missing sha256/url: %s' % bad[:5])
           print('manifest valid:', len(engines), 'engines')
           PY
       - name: Commit manifest.json + version.json to main
